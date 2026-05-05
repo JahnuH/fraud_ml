@@ -33,6 +33,7 @@ def main() -> None:
     print("Behavioral profile extracted successfully.")
     print(f"Baseline transactions used: {len(result.baseline_transactions)}")
     print(f"Profiles written: {len(result.profile_frame)}")
+    print(f"Unique accounts processed: {result.profile_frame['account_id'].nunique()}")
 
     if args.print_model_frame:
         print(result.model_frame.to_string(index=False))

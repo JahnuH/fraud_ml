@@ -40,26 +40,51 @@ class HybridBehaviorScorer:
 
     def run(self) -> ScoringArtifacts:
         transactions = self.feature_engineer.load_raw_transactions()
-        baseline, anomalous = self._split_baseline_and_anomalous(transactions)
-        if anomalous.empty:
+        if self.account_id:
+            transactions = transactions.loc[transactions["account_id"].astype(str) == str(self.account_id)].copy()
+
+        all_baseline_frames: list[pd.DataFrame] = []
+        all_anomalous_frames: list[pd.DataFrame] = []
+        all_baseline_feature_frames: list[pd.DataFrame] = []
+        all_anomalous_feature_frames: list[pd.DataFrame] = []
+        all_scored_frames: list[pd.DataFrame] = []
+        all_monthly_summaries: list[pd.DataFrame] = []
+
+        grouped = transactions.sort_values(["account_id", "event_ts"]).groupby("account_id", sort=True)
+        for _, account_transactions in grouped:
+            baseline, anomalous = self._split_baseline_and_anomalous(account_transactions.copy())
+            if anomalous.empty:
+                continue
+
+            baseline_features = self._build_baseline_feature_matrix(baseline)
+            anomalous_features = self._build_batch_target_feature_matrix(baseline, anomalous)
+            scored_transactions = self._score_transactions(baseline, anomalous, baseline_features, anomalous_features)
+            monthly_summary = self._build_monthly_summary(baseline, anomalous, scored_transactions)
+
+            all_baseline_frames.append(baseline)
+            all_anomalous_frames.append(anomalous)
+            all_baseline_feature_frames.append(baseline_features)
+            all_anomalous_feature_frames.append(anomalous_features)
+            all_scored_frames.append(scored_transactions)
+            all_monthly_summaries.append(monthly_summary)
+
+        if not all_anomalous_frames:
             raise ValueError("No anomalous-month transactions found to score.")
 
-        baseline_features = self._build_baseline_feature_matrix(baseline)
-        anomalous_features = self._build_batch_target_feature_matrix(baseline, anomalous)
-        scored_transactions = self._score_transactions(baseline, anomalous, baseline_features, anomalous_features)
-        monthly_summary = self._build_monthly_summary(baseline, anomalous, scored_transactions)
-
         return ScoringArtifacts(
-            baseline_transactions=baseline,
-            anomalous_transactions=anomalous,
-            baseline_feature_matrix=baseline_features,
-            anomalous_feature_matrix=anomalous_features,
-            scored_transactions=scored_transactions,
-            monthly_summary=monthly_summary,
+            baseline_transactions=pd.concat(all_baseline_frames, ignore_index=True),
+            anomalous_transactions=pd.concat(all_anomalous_frames, ignore_index=True),
+            baseline_feature_matrix=pd.concat(all_baseline_feature_frames, ignore_index=True),
+            anomalous_feature_matrix=pd.concat(all_anomalous_feature_frames, ignore_index=True),
+            scored_transactions=pd.concat(all_scored_frames, ignore_index=True),
+            monthly_summary=pd.concat(all_monthly_summaries, ignore_index=True),
         )
 
     def score_realtime_transaction(self, transaction_payload: dict[str, Any]) -> dict[str, Any]:
         transactions = self.feature_engineer.load_raw_transactions()
+        transactions = transactions.loc[
+            transactions["account_id"].astype(str) == str(transaction_payload["account_id"])
+        ].copy()
         baseline, _ = self._split_baseline_and_anomalous(transactions)
         baseline_features = self._build_baseline_feature_matrix(baseline)
         self.model.fit(baseline_features[self._feature_columns(baseline_features)])

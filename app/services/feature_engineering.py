@@ -64,17 +64,13 @@ class BehavioralFeatureEngineer:
         return frame
 
     def build_features(self, transactions: pd.DataFrame) -> FeatureEngineeringResult:
-        baseline = self._baseline_window(transactions)
-        if baseline.empty:
-            raise ValueError("Baseline transaction window is empty.")
-
-        return self._build_profile_result(baseline)
+        return self._build_grouped_results(transactions, use_baseline_window=True)
 
     def build_continuous_profile(self, transactions: pd.DataFrame) -> pd.DataFrame:
         if transactions.empty:
             raise ValueError("No transactions available for continuous profile update.")
 
-        profile_result = self._build_profile_result(transactions.copy())
+        profile_result = self._build_grouped_results(transactions.copy(), use_baseline_window=False)
         return profile_result.profile_frame
 
     def upsert_behavioral_profile(self, profile_frame: pd.DataFrame) -> None:
@@ -184,6 +180,41 @@ class BehavioralFeatureEngineer:
             profile_frame=profile_frame,
             model_frame=model_frame,
             baseline_transactions=baseline,
+        )
+
+    def _build_grouped_results(
+        self,
+        transactions: pd.DataFrame,
+        use_baseline_window: bool,
+    ) -> FeatureEngineeringResult:
+        if transactions.empty:
+            raise ValueError("No transactions available for feature engineering.")
+
+        profile_frames: list[pd.DataFrame] = []
+        model_frames: list[pd.DataFrame] = []
+        baseline_frames: list[pd.DataFrame] = []
+
+        grouped = transactions.sort_values(["account_id", "event_ts"]).groupby("account_id", sort=True)
+        for _, account_transactions in grouped:
+            account_frame = account_transactions.copy()
+            working_frame = self._baseline_window(account_frame) if use_baseline_window else account_frame
+            if working_frame.empty:
+                continue
+
+            result = self._build_profile_result(working_frame)
+            profile_frames.append(result.profile_frame)
+            model_frames.append(result.model_frame)
+            baseline_frames.append(result.baseline_transactions)
+
+        if not profile_frames:
+            if use_baseline_window:
+                raise ValueError("Baseline transaction window is empty.")
+            raise ValueError("No valid transactions available for continuous profile update.")
+
+        return FeatureEngineeringResult(
+            profile_frame=pd.concat(profile_frames, ignore_index=True),
+            model_frame=pd.concat(model_frames, ignore_index=True),
+            baseline_transactions=pd.concat(baseline_frames, ignore_index=True),
         )
 
     def persist_behavioral_profile(self, profile_frame: pd.DataFrame) -> None:
