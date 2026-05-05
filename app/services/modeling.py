@@ -1,0 +1,592 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import pandas as pd
+from sklearn.ensemble import IsolationForest
+from sqlalchemy import text
+
+from app.db.postgres import get_postgres_connection, get_sqlalchemy_engine
+from app.services.feature_engineering import BehavioralFeatureEngineer
+
+
+@dataclass
+class ScoringArtifacts:
+    baseline_transactions: pd.DataFrame
+    anomalous_transactions: pd.DataFrame
+    baseline_feature_matrix: pd.DataFrame
+    anomalous_feature_matrix: pd.DataFrame
+    scored_transactions: pd.DataFrame
+    monthly_summary: pd.DataFrame
+
+
+class HybridBehaviorScorer:
+    MODEL_WEIGHT = 0.35
+    STATISTICAL_WEIGHT = 0.50
+    FEATURE_DEVIATION_WEIGHT = 0.15
+    BEHAVIOR_CHANGE_THRESHOLD = 0.65
+
+    def __init__(self, account_id: str | None = None, contamination: float = 0.1, random_state: int = 42) -> None:
+        self.account_id = account_id
+        self.contamination = contamination
+        self.random_state = random_state
+        self.feature_engineer = BehavioralFeatureEngineer(account_id=account_id)
+        self.model = IsolationForest(
+            n_estimators=200,
+            contamination=contamination,
+            random_state=random_state,
+        )
+
+    def run(self) -> ScoringArtifacts:
+        transactions = self.feature_engineer.load_raw_transactions()
+        baseline, anomalous = self._split_baseline_and_anomalous(transactions)
+        if anomalous.empty:
+            raise ValueError("No anomalous-month transactions found to score.")
+
+        baseline_features = self._build_baseline_feature_matrix(baseline)
+        anomalous_features = self._build_batch_target_feature_matrix(baseline, anomalous)
+        scored_transactions = self._score_transactions(baseline, anomalous, baseline_features, anomalous_features)
+        monthly_summary = self._build_monthly_summary(baseline, anomalous, scored_transactions)
+
+        return ScoringArtifacts(
+            baseline_transactions=baseline,
+            anomalous_transactions=anomalous,
+            baseline_feature_matrix=baseline_features,
+            anomalous_feature_matrix=anomalous_features,
+            scored_transactions=scored_transactions,
+            monthly_summary=monthly_summary,
+        )
+
+    def score_realtime_transaction(self, transaction_payload: dict[str, Any]) -> dict[str, Any]:
+        transactions = self.feature_engineer.load_raw_transactions()
+        baseline, _ = self._split_baseline_and_anomalous(transactions)
+        baseline_features = self._build_baseline_feature_matrix(baseline)
+        self.model.fit(baseline_features[self._feature_columns(baseline_features)])
+
+        profile = self._load_behavioral_profile(transaction_payload["account_id"])
+        candidate_frame = pd.DataFrame([transaction_payload]).copy()
+        candidate_frame["event_ts"] = pd.to_datetime(candidate_frame["event_ts"], utc=False)
+        candidate_frame["amount"] = pd.to_numeric(candidate_frame["amount"])
+
+        candidate_features = self._build_single_target_feature_matrix(
+            baseline_reference=baseline,
+            historical_transactions=transactions,
+            target_transaction=candidate_frame,
+        )
+        candidate_row = candidate_features.iloc[0]
+        scoring = self._compute_weighted_scores(
+            baseline=baseline,
+            scored_row=candidate_frame.iloc[0],
+            feature_row=candidate_row,
+            baseline_features=baseline_features,
+            profile=profile,
+            current_month_count=self._current_month_count(transactions, candidate_frame.iloc[0]) + 1,
+            current_day_count=self._current_day_count(transactions, candidate_frame.iloc[0]) + 1,
+        )
+        action = self._lookup_action_mapping(scoring["behavior_change"])
+        self._persist_scored_transaction(
+            transaction_payload=transaction_payload,
+            scoring=scoring,
+            action_mapping=action,
+        )
+        updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
+        self._refresh_behavioral_profile(updated_transactions)
+
+        return {
+            "behavior_score": scoring["behavior_score"],
+            "behavior_change": scoring["behavior_change"],
+            "reasons": scoring["behavior_reasons"],
+        }
+
+    def persist_scoring_results(self, scored_transactions: pd.DataFrame) -> None:
+        records = scored_transactions[
+            ["event_id", "behavior_score", "behavior_change", "behavior_reasons"]
+        ].to_dict(orient="records")
+
+        connection = get_postgres_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("TRUNCATE TABLE scoring_results")
+                cursor.executemany(
+                    """
+                    INSERT INTO scoring_results (
+                        event_id,
+                        behavior_score,
+                        behavior_change,
+                        behavior_reasons
+                    ) VALUES (
+                        %(event_id)s,
+                        %(behavior_score)s,
+                        %(behavior_change)s,
+                        %(behavior_reasons)s
+                    )
+                    """,
+                    records,
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _score_transactions(
+        self,
+        baseline: pd.DataFrame,
+        anomalous: pd.DataFrame,
+        baseline_features: pd.DataFrame,
+        anomalous_features: pd.DataFrame,
+    ) -> pd.DataFrame:
+        self.model.fit(baseline_features[self._feature_columns(baseline_features)])
+        profile = self._load_behavioral_profile(str(baseline["account_id"].iloc[0]))
+
+        scored = anomalous.copy().reset_index(drop=True)
+        scored = scored.merge(anomalous_features, on="event_id", how="left")
+        scored["daily_txn_count"] = scored.groupby(scored["event_ts"].dt.date)["event_id"].transform("count")
+        scored["monthly_txn_count"] = len(scored)
+
+        results: list[dict[str, Any]] = []
+        for _, row in scored.iterrows():
+            results.append(
+                self._compute_weighted_scores(
+                    baseline=baseline,
+                    scored_row=row,
+                    feature_row=row,
+                    baseline_features=baseline_features,
+                    profile=profile,
+                    current_month_count=int(row["monthly_txn_count"]),
+                    current_day_count=int(row["daily_txn_count"]),
+                )
+            )
+
+        results_frame = pd.DataFrame(results)
+        return pd.concat([scored.reset_index(drop=True), results_frame], axis=1)
+
+    def _compute_weighted_scores(
+        self,
+        baseline: pd.DataFrame,
+        scored_row: pd.Series,
+        feature_row: pd.Series,
+        baseline_features: pd.DataFrame,
+        profile: dict[str, Any],
+        current_month_count: int,
+        current_day_count: int,
+    ) -> dict[str, Any]:
+        baseline_amount_mean = float(baseline["amount"].mean())
+        baseline_amount_std = self._safe_std(float(baseline["amount"].std(ddof=0)))
+        baseline_daily_counts = baseline.groupby(baseline["event_ts"].dt.date).size()
+        baseline_monthly_counts = baseline.groupby(baseline["event_ts"].dt.to_period("M")).size()
+        daily_count_mean = float(baseline_daily_counts.mean())
+        daily_count_std = self._safe_std(float(baseline_daily_counts.std(ddof=0)))
+        monthly_count_mean = float(baseline_monthly_counts.mean())
+        monthly_count_std = self._safe_std(float(baseline_monthly_counts.std(ddof=0)))
+
+        feature_columns = self._feature_columns(baseline_features)
+        feature_frame = pd.DataFrame([feature_row[["event_id", *feature_columns]].to_dict()])
+        model_raw_score = float(-self.model.decision_function(feature_frame[feature_columns])[0])
+        baseline_model_scores = -self.model.decision_function(baseline_features[feature_columns])
+        model_score = self._normalize_score(
+            value=model_raw_score,
+            mean=float(baseline_model_scores.mean()),
+            std=self._safe_std(float(baseline_model_scores.std(ddof=0))),
+        )
+        iforest_anomaly = bool(self.model.predict(feature_frame[feature_columns])[0] == -1)
+
+        amount_zscore = (float(scored_row["amount"]) - baseline_amount_mean) / baseline_amount_std
+        daily_frequency_zscore = (current_day_count - daily_count_mean) / daily_count_std
+        monthly_frequency_zscore = (current_month_count - monthly_count_mean) / monthly_count_std
+
+        active_hours = set(int(hour) for hour in profile.get("active_hours", []))
+        known_devices = set(str(device) for device in profile.get("device_list", []))
+        known_locations = set(str(country) for country in profile.get("location_profile", []))
+        event_hour = int(pd.Timestamp(scored_row["event_ts"]).hour)
+
+        amount_component = min(max(amount_zscore, 0.0) / 3.0, 1.0)
+        daily_frequency_component = min(max(daily_frequency_zscore, 0.0) / 3.0, 1.0)
+        monthly_frequency_component = min(max(monthly_frequency_zscore, 0.0) / 3.0, 1.0)
+        unusual_time_component = 1.0 if active_hours and event_hour not in active_hours else 0.0
+
+        statistical_score = round(
+            (
+                0.20 * amount_component
+                + 0.20 * daily_frequency_component
+                + 0.40 * monthly_frequency_component
+                + 0.20 * unusual_time_component
+            ),
+            4,
+        )
+
+        feature_deviation_score = round(
+            (
+                0.15 * (1.0 if str(scored_row["ip"]) not in set(baseline["ip"].astype(str)) else 0.0)
+                + 0.35 * (1.0 if str(scored_row["device_fingerprint"]) not in known_devices else 0.0)
+                + 0.30 * (1.0 if str(scored_row["country"]) not in known_locations else 0.0)
+                + 0.20 * (1.0 if str(scored_row["mcc"]) not in set(baseline["mcc"].astype(str)) else 0.0)
+            ),
+            4,
+        )
+
+        behavior_score = round(
+            (
+                self.MODEL_WEIGHT * model_score
+                + self.STATISTICAL_WEIGHT * statistical_score
+                + self.FEATURE_DEVIATION_WEIGHT * feature_deviation_score
+            ),
+            4,
+        )
+
+        reasons: list[str] = []
+        if amount_component >= 0.8:
+            reasons.append("AMOUNT_SPIKE")
+        if daily_frequency_component >= 0.8 or monthly_frequency_component >= 0.8:
+            reasons.append("FREQUENCY_SPIKE")
+        if unusual_time_component > 0:
+            reasons.append("UNUSUAL_TIME")
+        if str(scored_row["device_fingerprint"]) not in known_devices:
+            reasons.append("NEW_DEVICE")
+        if str(scored_row["ip"]) not in set(baseline["ip"].astype(str)):
+            reasons.append("NEW_IP")
+        if str(scored_row["country"]) not in known_locations:
+            reasons.append("NEW_LOCATION")
+        if str(scored_row["mcc"]) not in set(baseline["mcc"].astype(str)):
+            reasons.append("NEW_MCC")
+        if iforest_anomaly:
+            reasons.append("IFOREST_ANOMALY")
+
+        major_reasons = {"AMOUNT_SPIKE", "FREQUENCY_SPIKE", "UNUSUAL_TIME"}
+        behavior_change = bool(
+            behavior_score >= self.BEHAVIOR_CHANGE_THRESHOLD or any(reason in major_reasons for reason in reasons)
+        )
+
+        return {
+            "model_score": round(model_score, 4),
+            "statistical_score": round(statistical_score, 4),
+            "feature_deviation_score": round(feature_deviation_score, 4),
+            "behavior_score": behavior_score,
+            "behavior_change": behavior_change,
+            "behavior_reasons": reasons,
+            "iforest_anomaly": iforest_anomaly,
+            "amount_zscore": round(float(amount_zscore), 4),
+            "daily_frequency_zscore": round(float(daily_frequency_zscore), 4),
+            "monthly_frequency_zscore": round(float(monthly_frequency_zscore), 4),
+        }
+
+    def _build_monthly_summary(
+        self,
+        baseline: pd.DataFrame,
+        anomalous: pd.DataFrame,
+        scored_transactions: pd.DataFrame,
+    ) -> pd.DataFrame:
+        baseline_monthly_counts = baseline.groupby(baseline["event_ts"].dt.to_period("M")).size()
+        anomalous_month = str(anomalous["event_ts"].dt.to_period("M").iloc[0])
+        reasons = sorted({reason for reasons in scored_transactions["behavior_reasons"] for reason in reasons})
+
+        return pd.DataFrame(
+            [
+                {
+                    "account_id": str(anomalous["account_id"].iloc[0]),
+                    "anomalous_month": anomalous_month,
+                    "baseline_avg_monthly_txn_count": float(baseline_monthly_counts.mean()),
+                    "anomalous_month_txn_count": int(len(anomalous)),
+                    "avg_behavior_score": float(scored_transactions["behavior_score"].mean()),
+                    "flagged_transactions": int(scored_transactions["behavior_change"].sum()),
+                    "reasons": reasons,
+                }
+            ]
+        )
+
+    def _build_baseline_feature_matrix(self, baseline: pd.DataFrame) -> pd.DataFrame:
+        return self._build_feature_matrix_from_context(context_frame=baseline, target_frame=baseline, baseline_reference=baseline)
+
+    def _build_batch_target_feature_matrix(self, baseline: pd.DataFrame, target: pd.DataFrame) -> pd.DataFrame:
+        return self._build_feature_matrix_from_context(
+            context_frame=target,
+            target_frame=target,
+            baseline_reference=baseline,
+        )
+
+    def _build_single_target_feature_matrix(
+        self,
+        baseline_reference: pd.DataFrame,
+        historical_transactions: pd.DataFrame,
+        target_transaction: pd.DataFrame,
+    ) -> pd.DataFrame:
+        context_frame = pd.concat([historical_transactions, target_transaction], ignore_index=True)
+        return self._build_feature_matrix_from_context(
+            context_frame=context_frame,
+            target_frame=target_transaction,
+            baseline_reference=baseline_reference,
+        )
+
+    def _build_feature_matrix_from_context(
+        self,
+        context_frame: pd.DataFrame,
+        target_frame: pd.DataFrame,
+        baseline_reference: pd.DataFrame,
+    ) -> pd.DataFrame:
+        context_frame = context_frame.sort_values("event_ts").copy()
+        target_frame = target_frame.sort_values("event_ts").copy()
+
+        known_devices = set(baseline_reference["device_fingerprint"].astype(str))
+        known_ips = set(baseline_reference["ip"].astype(str))
+        known_countries = set(baseline_reference["country"].astype(str))
+        known_mccs = set(baseline_reference["mcc"].astype(str))
+        hourly_distribution = baseline_reference["event_ts"].dt.hour.value_counts(normalize=True).sort_index()
+
+        context_frame["event_date"] = context_frame["event_ts"].dt.date
+        context_frame["event_week"] = context_frame["event_ts"].dt.to_period("W")
+        context_frame["context_daily_txn_count"] = context_frame.groupby("event_date")["event_id"].transform("count")
+        context_frame["context_weekly_txn_count"] = context_frame.groupby("event_week")["event_id"].transform("count")
+        context_frame["context_txn_gap_hours"] = (
+            context_frame["event_ts"].diff().dt.total_seconds().div(3600).fillna(24.0).clip(lower=0.0)
+        )
+
+        target_ids = set(target_frame["event_id"].astype(str))
+        scoped = context_frame.loc[context_frame["event_id"].astype(str).isin(target_ids)].copy()
+        scoped["event_hour"] = scoped["event_ts"].dt.hour
+        scoped["day_of_week"] = scoped["event_ts"].dt.dayofweek
+        scoped["is_weekend"] = (scoped["day_of_week"] >= 5).astype(int)
+        scoped["is_morning"] = scoped["event_hour"].between(6, 11).astype(int)
+        scoped["known_device"] = scoped["device_fingerprint"].astype(str).isin(known_devices).astype(int)
+        scoped["known_ip"] = scoped["ip"].astype(str).isin(known_ips).astype(int)
+        scoped["known_country"] = scoped["country"].astype(str).isin(known_countries).astype(int)
+        scoped["known_mcc"] = scoped["mcc"].astype(str).isin(known_mccs).astype(int)
+        scoped["hour_probability"] = scoped["event_hour"].map(hourly_distribution).fillna(0.0)
+
+        feature_frame = scoped[
+            [
+                "event_id",
+                "amount",
+                "event_hour",
+                "day_of_week",
+                "is_weekend",
+                "is_morning",
+                "known_device",
+                "known_ip",
+                "known_country",
+                "known_mcc",
+                "hour_probability",
+                "context_daily_txn_count",
+                "context_weekly_txn_count",
+                "context_txn_gap_hours",
+            ]
+        ].copy()
+
+        return feature_frame.rename(
+            columns={
+                "amount": "feature_amount",
+                "event_hour": "feature_event_hour",
+                "day_of_week": "feature_day_of_week",
+                "is_weekend": "feature_is_weekend",
+                "is_morning": "feature_is_morning",
+                "known_device": "feature_known_device",
+                "known_ip": "feature_known_ip",
+                "known_country": "feature_known_country",
+                "known_mcc": "feature_known_mcc",
+                "hour_probability": "feature_hour_probability",
+                "context_daily_txn_count": "feature_daily_txn_count",
+                "context_weekly_txn_count": "feature_weekly_txn_count",
+                "context_txn_gap_hours": "feature_txn_gap_hours",
+            }
+        )
+
+    def _load_behavioral_profile(self, account_id: str) -> dict[str, Any]:
+        connection = get_postgres_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        account_id,
+                        avg_amount,
+                        std_amount,
+                        txn_frequency,
+                        active_hours,
+                        device_list,
+                        location_profile
+                    FROM behavioral_profiles
+                    WHERE account_id = %s
+                    """,
+                    (account_id,),
+                )
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+
+        if row is None:
+            raise ValueError(f"No behavioral profile found for account_id={account_id}.")
+
+        return {
+            "account_id": row[0],
+            "avg_amount": row[1],
+            "std_amount": row[2],
+            "txn_frequency": row[3],
+            "active_hours": row[4] or [],
+            "device_list": row[5] or [],
+            "location_profile": row[6] or [],
+        }
+
+    def _lookup_action_mapping(self, behavior_change: bool) -> str:
+        connection = get_postgres_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT action_mapping
+                    FROM behavioral_config
+                    WHERE behavior_change_flag = %s
+                    LIMIT 1
+                    """,
+                    (behavior_change,),
+                )
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+
+        if row is None:
+            return "ALERT" if behavior_change else "ALLOW"
+        return str(row[0])
+
+    def _persist_scored_transaction(
+        self,
+        transaction_payload: dict[str, Any],
+        scoring: dict[str, Any],
+        action_mapping: str,
+    ) -> None:
+        engine = get_sqlalchemy_engine()
+        raw_transaction_params = {
+            "event_id": transaction_payload["event_id"],
+            "event_ts": pd.Timestamp(transaction_payload["event_ts"]).to_pydatetime(),
+            "account_id": transaction_payload["account_id"],
+            "instrument_id": transaction_payload["instrument_id"],
+            "amount": float(transaction_payload["amount"]),
+            "currency": transaction_payload["currency"],
+            "country": transaction_payload["country"],
+            "mcc": transaction_payload["mcc"],
+            "merchant_id": transaction_payload["merchant_id"],
+            "entry_mode": transaction_payload["entry_mode"],
+            "ip": transaction_payload["ip"],
+            "device_fingerprint": transaction_payload["device_fingerprint"],
+            "terminal_id": transaction_payload["terminal_id"],
+            "txn_type": transaction_payload["txn_type"],
+        }
+        scoring_params = {
+            "event_id": transaction_payload["event_id"],
+            "behavior_score": float(scoring["behavior_score"]),
+            "behavior_change": bool(scoring["behavior_change"]),
+            "behavior_reasons": list(scoring["behavior_reasons"]),
+        }
+        _ = action_mapping
+
+        insert_raw_transaction = text(
+            """
+            INSERT INTO raw_transactions (
+                event_id,
+                event_ts,
+                account_id,
+                instrument_id,
+                amount,
+                currency,
+                country,
+                mcc,
+                merchant_id,
+                entry_mode,
+                ip,
+                device_fingerprint,
+                terminal_id,
+                txn_type
+            ) VALUES (
+                :event_id,
+                :event_ts,
+                :account_id,
+                :instrument_id,
+                :amount,
+                :currency,
+                :country,
+                :mcc,
+                :merchant_id,
+                :entry_mode,
+                :ip,
+                :device_fingerprint,
+                :terminal_id,
+                :txn_type
+            )
+            ON CONFLICT (event_id) DO UPDATE SET
+                event_ts = EXCLUDED.event_ts,
+                account_id = EXCLUDED.account_id,
+                instrument_id = EXCLUDED.instrument_id,
+                amount = EXCLUDED.amount,
+                currency = EXCLUDED.currency,
+                country = EXCLUDED.country,
+                mcc = EXCLUDED.mcc,
+                merchant_id = EXCLUDED.merchant_id,
+                entry_mode = EXCLUDED.entry_mode,
+                ip = EXCLUDED.ip,
+                device_fingerprint = EXCLUDED.device_fingerprint,
+                terminal_id = EXCLUDED.terminal_id,
+                txn_type = EXCLUDED.txn_type
+            """
+        )
+        upsert_scoring_result = text(
+            """
+            INSERT INTO scoring_results (
+                event_id,
+                behavior_score,
+                behavior_change,
+                behavior_reasons
+            ) VALUES (
+                :event_id,
+                :behavior_score,
+                :behavior_change,
+                :behavior_reasons
+            )
+            ON CONFLICT (event_id) DO UPDATE SET
+                behavior_score = EXCLUDED.behavior_score,
+                behavior_change = EXCLUDED.behavior_change,
+                behavior_reasons = EXCLUDED.behavior_reasons
+            """
+        )
+
+        try:
+            with engine.begin() as connection:
+                connection.execute(insert_raw_transaction, raw_transaction_params)
+                connection.execute(upsert_scoring_result, scoring_params)
+        finally:
+            engine.dispose()
+
+    def _refresh_behavioral_profile(self, transactions: pd.DataFrame) -> None:
+        updated_profile = self.feature_engineer.build_continuous_profile(transactions)
+        self.feature_engineer.upsert_behavioral_profile(updated_profile)
+
+    @staticmethod
+    def _current_month_count(transactions: pd.DataFrame, candidate_row: pd.Series) -> int:
+        candidate_ts = pd.Timestamp(candidate_row["event_ts"])
+        same_month = transactions["event_ts"].dt.to_period("M") == candidate_ts.to_period("M")
+        same_account = transactions["account_id"].astype(str) == str(candidate_row["account_id"])
+        return int(transactions.loc[same_month & same_account].shape[0])
+
+    @staticmethod
+    def _current_day_count(transactions: pd.DataFrame, candidate_row: pd.Series) -> int:
+        candidate_date = pd.Timestamp(candidate_row["event_ts"]).date()
+        same_day = transactions["event_ts"].dt.date == candidate_date
+        same_account = transactions["account_id"].astype(str) == str(candidate_row["account_id"])
+        return int(transactions.loc[same_day & same_account].shape[0])
+
+    @staticmethod
+    def _feature_columns(frame: pd.DataFrame) -> list[str]:
+        return [column for column in frame.columns if column.startswith("feature_")]
+
+    @staticmethod
+    def _normalize_score(value: float, mean: float, std: float) -> float:
+        return round(min(max((value - mean) / (3.0 * std), 0.0), 1.0), 4)
+
+    @staticmethod
+    def _safe_std(value: float) -> float:
+        return value if value > 0 else 1.0
+
+    @staticmethod
+    def _split_baseline_and_anomalous(transactions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        working = transactions.copy()
+        working["event_month"] = working["event_ts"].dt.to_period("M")
+        last_month = working["event_month"].max()
+        baseline = working.loc[working["event_month"] != last_month].drop(columns=["event_month"])
+        anomalous = working.loc[working["event_month"] == last_month].drop(columns=["event_month"])
+        return baseline, anomalous
