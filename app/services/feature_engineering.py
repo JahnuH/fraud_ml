@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import asin, cos, radians, sin, sqrt
+from typing import Any
 
 import pandas as pd
 from sqlalchemy import text
@@ -35,7 +37,8 @@ class BehavioralFeatureEngineer:
                 ip,
                 device_fingerprint,
                 terminal_id,
-                txn_type
+                txn_type,
+                geo_coordinates
             FROM raw_transactions
             {where_clause}
             ORDER BY event_ts
@@ -61,7 +64,81 @@ class BehavioralFeatureEngineer:
 
         frame["event_ts"] = pd.to_datetime(frame["event_ts"], utc=False)
         frame["amount"] = pd.to_numeric(frame["amount"])
+        if "geo_coordinates" in frame.columns:
+            frame["geo_coordinates"] = frame["geo_coordinates"].apply(self._normalize_geo_coordinates)
         return frame
+
+    def get_latest_transaction_for_account(self, account_id: str) -> dict[str, Any] | None:
+        engine = get_sqlalchemy_engine()
+        query = text(
+            """
+            SELECT
+                event_id,
+                event_ts,
+                account_id,
+                country,
+                geo_coordinates
+            FROM raw_transactions
+            WHERE account_id = :account_id
+            ORDER BY event_ts DESC
+            LIMIT 1
+            """
+        )
+        try:
+            with engine.begin() as connection:
+                row = connection.execute(query, {"account_id": account_id}).mappings().first()
+        finally:
+            engine.dispose()
+
+        if row is None:
+            return None
+
+        return {
+            "event_id": str(row["event_id"]),
+            "event_ts": pd.Timestamp(row["event_ts"]),
+            "account_id": str(row["account_id"]),
+            "country": str(row["country"]),
+            "geo_coordinates": self._normalize_geo_coordinates(row["geo_coordinates"]),
+        }
+
+    def compute_impossible_travel(
+        self,
+        current_transaction: dict[str, Any],
+        previous_transaction: dict[str, Any] | None,
+        max_speed_kmh: float = 900.0,
+    ) -> dict[str, Any]:
+        result = {
+            "impossible_travel": False,
+            "distance_km": None,
+            "travel_speed_kmh": None,
+            "time_diff_hours": None,
+        }
+        if previous_transaction is None:
+            return result
+
+        current_country = str(current_transaction.get("country", ""))
+        previous_country = str(previous_transaction.get("country", ""))
+        if current_country == previous_country:
+            return result
+
+        current_coords = self._normalize_geo_coordinates(current_transaction.get("geo_coordinates"))
+        previous_coords = self._normalize_geo_coordinates(previous_transaction.get("geo_coordinates"))
+        if current_coords is None or previous_coords is None:
+            return result
+
+        current_ts = pd.Timestamp(current_transaction["event_ts"])
+        previous_ts = pd.Timestamp(previous_transaction["event_ts"])
+        time_diff_hours = (current_ts - previous_ts).total_seconds() / 3600.0
+        result["time_diff_hours"] = round(time_diff_hours, 4)
+        if time_diff_hours <= 0:
+            return result
+
+        distance_km = self._haversine_km(previous_coords, current_coords)
+        travel_speed_kmh = distance_km / time_diff_hours
+        result["distance_km"] = round(distance_km, 4)
+        result["travel_speed_kmh"] = round(travel_speed_kmh, 4)
+        result["impossible_travel"] = travel_speed_kmh > max_speed_kmh
+        return result
 
     def build_features(self, transactions: pd.DataFrame) -> FeatureEngineeringResult:
         return self._build_grouped_results(transactions, use_baseline_window=True)
@@ -237,3 +314,29 @@ class BehavioralFeatureEngineer:
         working["event_month"] = working["event_ts"].dt.to_period("M")
         last_month = working["event_month"].max()
         return working.loc[working["event_month"] != last_month].drop(columns=["event_month"])
+
+    @staticmethod
+    def _normalize_geo_coordinates(value: Any) -> list[float] | None:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return [float(value[0]), float(value[1])]
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @staticmethod
+    def _haversine_km(origin: list[float], destination: list[float]) -> float:
+        lat1, lon1 = origin
+        lat2, lon2 = destination
+        radius_km = 6371.0
+
+        delta_lat = radians(lat2 - lat1)
+        delta_lon = radians(lon2 - lon1)
+        lat1_rad = radians(lat1)
+        lat2_rad = radians(lat2)
+
+        a = sin(delta_lat / 2) ** 2 + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2) ** 2
+        c = 2 * asin(sqrt(a))
+        return radius_km * c

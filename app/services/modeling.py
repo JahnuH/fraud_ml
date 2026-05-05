@@ -93,6 +93,10 @@ class HybridBehaviorScorer:
         candidate_frame = pd.DataFrame([transaction_payload]).copy()
         candidate_frame["event_ts"] = pd.to_datetime(candidate_frame["event_ts"], utc=False)
         candidate_frame["amount"] = pd.to_numeric(candidate_frame["amount"])
+        if "geo_coordinates" in candidate_frame.columns:
+            candidate_frame["geo_coordinates"] = candidate_frame["geo_coordinates"].apply(
+                self.feature_engineer._normalize_geo_coordinates
+            )
 
         candidate_features = self._build_single_target_feature_matrix(
             baseline_reference=baseline,
@@ -100,6 +104,11 @@ class HybridBehaviorScorer:
             target_transaction=candidate_frame,
         )
         candidate_row = candidate_features.iloc[0]
+        previous_transaction = self.feature_engineer.get_latest_transaction_for_account(transaction_payload["account_id"])
+        impossible_travel_context = self.feature_engineer.compute_impossible_travel(
+            current_transaction=candidate_frame.iloc[0].to_dict(),
+            previous_transaction=previous_transaction,
+        )
         scoring = self._compute_weighted_scores(
             baseline=baseline,
             scored_row=candidate_frame.iloc[0],
@@ -108,6 +117,7 @@ class HybridBehaviorScorer:
             profile=profile,
             current_month_count=self._current_month_count(transactions, candidate_frame.iloc[0]) + 1,
             current_day_count=self._current_day_count(transactions, candidate_frame.iloc[0]) + 1,
+            impossible_travel_context=impossible_travel_context,
         )
         action = self._lookup_action_mapping(scoring["behavior_change"])
         self._persist_scored_transaction(
@@ -194,6 +204,7 @@ class HybridBehaviorScorer:
         profile: dict[str, Any],
         current_month_count: int,
         current_day_count: int,
+        impossible_travel_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         baseline_amount_mean = float(baseline["amount"].mean())
         baseline_amount_std = self._safe_std(float(baseline["amount"].std(ddof=0)))
@@ -275,11 +286,15 @@ class HybridBehaviorScorer:
             reasons.append("NEW_MCC")
         if iforest_anomaly:
             reasons.append("IFOREST_ANOMALY")
+        if impossible_travel_context and impossible_travel_context.get("impossible_travel"):
+            reasons.append("IMPOSSIBLE_TRAVEL")
 
         major_reasons = {"AMOUNT_SPIKE", "FREQUENCY_SPIKE", "UNUSUAL_TIME"}
         behavior_change = bool(
             behavior_score >= self.BEHAVIOR_CHANGE_THRESHOLD or any(reason in major_reasons for reason in reasons)
         )
+        if impossible_travel_context and impossible_travel_context.get("impossible_travel"):
+            behavior_change = True
 
         return {
             "model_score": round(model_score, 4),
@@ -292,6 +307,12 @@ class HybridBehaviorScorer:
             "amount_zscore": round(float(amount_zscore), 4),
             "daily_frequency_zscore": round(float(daily_frequency_zscore), 4),
             "monthly_frequency_zscore": round(float(monthly_frequency_zscore), 4),
+            "impossible_travel": bool(impossible_travel_context.get("impossible_travel", False))
+            if impossible_travel_context
+            else False,
+            "distance_km": impossible_travel_context.get("distance_km") if impossible_travel_context else None,
+            "travel_speed_kmh": impossible_travel_context.get("travel_speed_kmh") if impossible_travel_context else None,
+            "travel_time_hours": impossible_travel_context.get("time_diff_hours") if impossible_travel_context else None,
         }
 
     def _build_monthly_summary(
@@ -492,6 +513,7 @@ class HybridBehaviorScorer:
             "device_fingerprint": transaction_payload["device_fingerprint"],
             "terminal_id": transaction_payload["terminal_id"],
             "txn_type": transaction_payload["txn_type"],
+            "geo_coordinates": self.feature_engineer._normalize_geo_coordinates(transaction_payload.get("geo_coordinates")),
         }
         scoring_params = {
             "event_id": transaction_payload["event_id"],
@@ -517,7 +539,8 @@ class HybridBehaviorScorer:
                 ip,
                 device_fingerprint,
                 terminal_id,
-                txn_type
+                txn_type,
+                geo_coordinates
             ) VALUES (
                 :event_id,
                 :event_ts,
@@ -532,7 +555,8 @@ class HybridBehaviorScorer:
                 :ip,
                 :device_fingerprint,
                 :terminal_id,
-                :txn_type
+                :txn_type,
+                :geo_coordinates
             )
             ON CONFLICT (event_id) DO UPDATE SET
                 event_ts = EXCLUDED.event_ts,
@@ -547,7 +571,8 @@ class HybridBehaviorScorer:
                 ip = EXCLUDED.ip,
                 device_fingerprint = EXCLUDED.device_fingerprint,
                 terminal_id = EXCLUDED.terminal_id,
-                txn_type = EXCLUDED.txn_type
+                txn_type = EXCLUDED.txn_type,
+                geo_coordinates = EXCLUDED.geo_coordinates
             """
         )
         upsert_scoring_result = text(

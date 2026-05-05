@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE raw_transactions
+    ADD COLUMN IF NOT EXISTS geo_coordinates DOUBLE PRECISION[];
+
+COMMIT;

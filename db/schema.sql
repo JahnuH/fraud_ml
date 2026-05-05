@@ -12,8 +12,12 @@ CREATE TABLE IF NOT EXISTS raw_transactions (
     ip INET NOT NULL,
     device_fingerprint VARCHAR(128) NOT NULL,
     terminal_id VARCHAR(64) NOT NULL,
-    txn_type VARCHAR(32) NOT NULL
+    txn_type VARCHAR(32) NOT NULL,
+    geo_coordinates DOUBLE PRECISION[]
 );
+
+ALTER TABLE raw_transactions
+    ADD COLUMN IF NOT EXISTS geo_coordinates DOUBLE PRECISION[];
 
 CREATE TABLE IF NOT EXISTS behavioral_profiles (
     account_id VARCHAR(64) PRIMARY KEY,

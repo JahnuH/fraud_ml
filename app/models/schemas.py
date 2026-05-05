@@ -19,6 +19,7 @@ class TransactionRecord(BaseModel):
     device_fingerprint: str
     terminal_id: str
     txn_type: str
+    geo_coordinates: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
 
 class SimulationSummary(BaseModel):
@@ -45,6 +46,7 @@ class BehaviorScoringRequest(BaseModel):
     device_fingerprint: str
     terminal_id: str
     txn_type: str
+    geo_coordinates: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
 
 class BehaviorScoringResponse(BaseModel):

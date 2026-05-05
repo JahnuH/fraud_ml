@@ -25,6 +25,7 @@ class CustomerContext:
     country: str
     device_fingerprint: str
     home_ip_prefix: str
+    home_geo_coordinates: list[float]
 
 
 class TransactionSimulator:
@@ -174,6 +175,7 @@ class TransactionSimulator:
             "device_fingerprint": self.customer.device_fingerprint,
             "terminal_id": terminal_id,
             "txn_type": txn_type,
+            "geo_coordinates": self.customer.home_geo_coordinates,
         }
 
     def _sample_baseline_timestamp(self, month_start: date, days_in_month: int) -> datetime:
@@ -199,6 +201,7 @@ class TransactionSimulator:
             country="IN",
             device_fingerprint=f"devfp-{device_suffix:08x}",
             home_ip_prefix=ip_prefix,
+            home_geo_coordinates=[12.9716 + (customer_index * 0.01), 77.5946 + (customer_index * 0.01)],
         )
 
     @staticmethod
@@ -234,7 +237,8 @@ class TransactionSimulator:
                         ip,
                         device_fingerprint,
                         terminal_id,
-                        txn_type
+                        txn_type,
+                        geo_coordinates
                     ) VALUES (
                         %(event_id)s,
                         %(event_ts)s,
@@ -249,7 +253,8 @@ class TransactionSimulator:
                         %(ip)s,
                         %(device_fingerprint)s,
                         %(terminal_id)s,
-                        %(txn_type)s
+                        %(txn_type)s,
+                        %(geo_coordinates)s
                     )
                 """
                 cursor.executemany(insert_sql, transactions.to_dict(orient="records"))

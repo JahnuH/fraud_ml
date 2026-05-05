@@ -9,3 +9,5 @@ sqlalchemy
 streamlit
 plotly
 requests
+folium
+streamlit-folium

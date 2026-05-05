@@ -11,7 +11,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import folium
 from sqlalchemy import text
+from streamlit_folium import st_folium
 
 from app.db.postgres import get_sqlalchemy_engine
 
@@ -22,6 +24,28 @@ COUNTRY_CODES = ["IN", "US", "UK", "SG", "AE", "CA", "AU", "DE", "FR", "JP"]
 
 
 st.set_page_config(page_title="Behavioral Anomaly Testing UI", layout="wide")
+
+
+def _apply_geo_picker_selection() -> None:
+    map_state = st.session_state.get("geo_picker_map", {})
+    clicked = map_state.get("last_clicked") if isinstance(map_state, dict) else None
+    if not clicked:
+        return
+
+    lat_value = f"{clicked['lat']:.6f}"
+    lon_value = f"{clicked['lng']:.6f}"
+    click_signature = (lat_value, lon_value)
+    if st.session_state.get("geo_picker_last_click") == click_signature:
+        return
+
+    st.session_state["geo_picker_last_click"] = click_signature
+    st.session_state["geo_lat_value"] = lat_value
+    st.session_state["geo_lon_value"] = lon_value
+
+
+def _sync_geo_coordinate_widgets() -> None:
+    st.session_state["geo_lat"] = st.session_state.get("geo_lat_value", "12.9716")
+    st.session_state["geo_lon"] = st.session_state.get("geo_lon_value", "77.5946")
 
 
 def load_dataframe(query: str, params: dict | None = None) -> pd.DataFrame:
@@ -110,6 +134,7 @@ def load_visualization_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
             rt.account_id,
             rt.amount,
             rt.country,
+            rt.geo_coordinates,
             rt.mcc,
             sr.behavior_score,
             sr.behavior_change,
@@ -128,32 +153,103 @@ def render_single_transaction_tester() -> None:
     st.subheader("Single Transaction Tester")
     api_base = st.text_input("FastAPI Base URL", value=DEFAULT_API_BASE)
 
-    with st.form("transaction_form"):
-        col1, col2, col3 = st.columns(3)
-        event_id = col1.text_input("Event ID", value=str(uuid4()))
-        account_id = col2.text_input("Account ID", value="ACC1000001")
-        instrument_id = col3.text_input("Instrument ID", value="CARD5000001")
+    if "geo_lat_value" not in st.session_state:
+        st.session_state["geo_lat_value"] = "12.9716"
+    if "geo_lon_value" not in st.session_state:
+        st.session_state["geo_lon_value"] = "77.5946"
+    if "geo_picker_last_click" not in st.session_state:
+        st.session_state["geo_picker_last_click"] = None
 
-        col4, col5, col6, col7 = st.columns(4)
-        event_date = col4.date_input("Event Date", value=date(2026, 6, 2))
-        event_time = col5.time_input("Event Time", value=time(9, 15, 0))
-        amount = col6.number_input("Amount", min_value=1.0, value=850.0, step=50.0)
-        mcc = col7.text_input("MCC", value="5411")
+    _sync_geo_coordinate_widgets()
 
-        col8, col9, col10 = st.columns(3)
-        country = col8.selectbox("Country", options=COUNTRY_CODES, index=COUNTRY_CODES.index("IN"))
-        ip = col9.text_input("IP", value="49.43.12.110")
-        device_fingerprint = col10.text_input("Device Fingerprint", value="devfp-0a91cd73")
+    st.caption("Enter latitude and longitude manually, or click the mini map to drop a pin and auto-fill both fields.")
 
-        col11, col12, col13 = st.columns(3)
-        merchant_id = col11.text_input("Merchant ID", value="MERGROC-210")
-        entry_mode = col12.text_input("Entry Mode", value="CHIP")
-        terminal_id = col13.text_input("Terminal ID", value="TERM-2101")
+    geo_col1, geo_col2 = st.columns(2)
+    geo_lat = geo_col1.text_input("Latitude", key="geo_lat")
+    geo_lon = geo_col2.text_input("Longitude", key="geo_lon")
+    st.session_state["geo_lat_value"] = geo_lat
+    st.session_state["geo_lon_value"] = geo_lon
 
-        txn_type = st.text_input("Transaction Type", value="PURCHASE")
-        submit = st.form_submit_button("Submit")
+    try:
+        map_lat = float(st.session_state["geo_lat_value"])
+        map_lon = float(st.session_state["geo_lon_value"])
+    except ValueError:
+        map_lat = 20.0
+        map_lon = 0.0
+
+    mini_map = folium.Map(
+        location=[map_lat, map_lon],
+        zoom_start=2,
+        tiles=None,
+        world_copy_jump=False,
+        max_bounds=True,
+        min_lat=-85,
+        max_lat=85,
+        min_lon=-180,
+        max_lon=180,
+    )
+    folium.TileLayer(
+        tiles="CartoDB positron",
+        attr="&copy; OpenStreetMap contributors &copy; CARTO",
+        no_wrap=True,
+    ).add_to(mini_map)
+    folium.CircleMarker(
+        location=[map_lat, map_lon],
+        radius=8,
+        color="#d62828",
+        weight=2,
+        fill=True,
+        fill_color="#f77f00",
+        fill_opacity=0.85,
+        tooltip="Selected coordinates",
+    ).add_to(mini_map)
+    map_result = st_folium(
+        mini_map,
+        key="geo_picker_map",
+        height=300,
+        returned_objects=["last_clicked"],
+        use_container_width=True,
+        on_change=_apply_geo_picker_selection,
+        wrap_longitude=False,
+    )
+    if map_result and map_result.get("last_clicked"):
+        selected = map_result["last_clicked"]
+        st.caption(f"Selected on map: {selected['lat']:.6f}, {selected['lng']:.6f}")
+
+    col1, col2, col3 = st.columns(3)
+    event_id = col1.text_input("Event ID", value=str(uuid4()))
+    account_id = col2.text_input("Account ID", value="ACC1000001")
+    instrument_id = col3.text_input("Instrument ID", value="CARD5000001")
+
+    col4, col5, col6, col7 = st.columns(4)
+    event_date = col4.date_input("Event Date", value=date(2026, 6, 2))
+    event_time = col5.time_input("Event Time", value=time(9, 15, 0))
+    amount = col6.number_input("Amount", min_value=1.0, value=850.0, step=50.0)
+    mcc = col7.text_input("MCC", value="5411")
+
+    col8, col9, col10 = st.columns(3)
+    country = col8.selectbox("Country", options=COUNTRY_CODES, index=COUNTRY_CODES.index("IN"))
+    ip = col9.text_input("IP", value="49.43.12.110")
+    device_fingerprint = col10.text_input("Device Fingerprint", value="devfp-0a91cd73")
+
+    col11, col12, col13 = st.columns(3)
+    merchant_id = col11.text_input("Merchant ID", value="MERGROC-210")
+    entry_mode = col12.text_input("Entry Mode", value="CHIP")
+    terminal_id = col13.text_input("Terminal ID", value="TERM-2101")
+
+    txn_type = st.text_input("Transaction Type", value="PURCHASE")
+    submit = st.button("Submit", type="primary")
 
     if submit:
+        try:
+            geo_coordinates = [
+                float(st.session_state["geo_lat_value"]),
+                float(st.session_state["geo_lon_value"]),
+            ]
+        except (TypeError, ValueError):
+            st.error("Latitude and Longitude must be valid decimal numbers.")
+            return
+
         event_ts = datetime.combine(event_date, event_time).isoformat()
         payload = {
             "event_id": event_id,
@@ -170,6 +266,7 @@ def render_single_transaction_tester() -> None:
             "device_fingerprint": device_fingerprint,
             "terminal_id": terminal_id,
             "txn_type": txn_type,
+            "geo_coordinates": geo_coordinates,
         }
         try:
             response = requests.post(f"{api_base.rstrip('/')}/score-behavior", json=payload, timeout=30)
