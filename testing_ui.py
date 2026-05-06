@@ -106,6 +106,21 @@ def run_post_generation_pipeline(run_scoring: bool) -> dict:
     return result
 
 
+def clear_behavior_history() -> None:
+    engine = get_sqlalchemy_engine()
+    truncate_sql = text(
+        """
+        TRUNCATE TABLE raw_transactions, behavioral_profiles, scoring_results
+        RESTART IDENTITY CASCADE
+        """
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(truncate_sql)
+    finally:
+        engine.dispose()
+
+
 def parse_reason_array(value) -> list[str]:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return []
@@ -303,7 +318,9 @@ def render_bulk_simulator_controller() -> None:
     inject_amount_spike = col4.toggle("Inject Large Amount Spike", value=False)
     inject_new_ip = col5.toggle("Inject New IP Usage", value=False)
 
-    if st.button("Run Simulation", type="primary"):
+    action_col1, action_col2 = st.columns(2)
+
+    if action_col1.button("Run Simulation", type="primary"):
         try:
             summary = run_generation_script(
                 customers=customers,
@@ -329,6 +346,15 @@ def render_bulk_simulator_controller() -> None:
                 st.text(pipeline["score_output"])
             else:
                 st.info("Scoring skipped because all anomaly toggles were turned off.")
+
+    if action_col2.button("Clear History"):
+        try:
+            clear_behavior_history()
+        except Exception as exc:
+            st.error(f"Failed to clear history: {exc}")
+            return
+
+        st.success("Cleared raw_transactions, behavioral_profiles, and scoring_results.")
 
 
 def render_metrics_and_visualization() -> None:

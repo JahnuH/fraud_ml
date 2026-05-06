@@ -81,15 +81,10 @@ class HybridBehaviorScorer:
         )
 
     def score_realtime_transaction(self, transaction_payload: dict[str, Any]) -> dict[str, Any]:
-        transactions = self.feature_engineer.load_raw_transactions()
-        transactions = transactions.loc[
-            transactions["account_id"].astype(str) == str(transaction_payload["account_id"])
-        ].copy()
-        baseline, _ = self._split_baseline_and_anomalous(transactions)
-        baseline_features = self._build_baseline_feature_matrix(baseline)
-        self.model.fit(baseline_features[self._feature_columns(baseline_features)])
-
-        profile = self._load_behavioral_profile(transaction_payload["account_id"])
+        transactions = self.feature_engineer.load_account_transactions(
+            account_id=str(transaction_payload["account_id"]),
+            normal_only=True,
+        )
         candidate_frame = pd.DataFrame([transaction_payload]).copy()
         candidate_frame["event_ts"] = pd.to_datetime(candidate_frame["event_ts"], utc=False)
         candidate_frame["amount"] = pd.to_numeric(candidate_frame["amount"])
@@ -97,26 +92,97 @@ class HybridBehaviorScorer:
             candidate_frame["geo_coordinates"] = candidate_frame["geo_coordinates"].apply(
                 self.feature_engineer._normalize_geo_coordinates
             )
+        candidate_record = candidate_frame.iloc[0]
 
+        if transactions.empty:
+            cold_start_status = self.feature_engineer.assess_cold_start(
+                historical_transactions=transactions,
+                candidate_timestamp=pd.Timestamp(candidate_record["event_ts"]),
+            )
+            scoring = self._build_cold_start_scoring(None, cold_start_status)
+            action = self._lookup_action_mapping(scoring["behavior_change"])
+            self._persist_scored_transaction(
+                transaction_payload=transaction_payload,
+                scoring=scoring,
+                action_mapping=action,
+            )
+
+            return {
+                "behavior_score": scoring["behavior_score"],
+                "behavior_change": scoring["behavior_change"],
+                "reasons": scoring["behavior_reasons"],
+            }
+
+        previous_transaction = self.feature_engineer.get_latest_transaction_for_account(
+            transaction_payload["account_id"],
+            normal_only=True,
+        )
+        impossible_travel_context = self.feature_engineer.compute_impossible_travel(
+            current_transaction=candidate_record.to_dict(),
+            previous_transaction=previous_transaction,
+        )
+        cold_start_status = self.feature_engineer.assess_cold_start(
+            historical_transactions=transactions,
+            candidate_timestamp=pd.Timestamp(candidate_record["event_ts"]),
+        )
+        if cold_start_status["is_cold_start"]:
+            scoring = self._build_cold_start_scoring(impossible_travel_context, cold_start_status)
+            action = self._lookup_action_mapping(scoring["behavior_change"])
+            self._persist_scored_transaction(
+                transaction_payload=transaction_payload,
+                scoring=scoring,
+                action_mapping=action,
+            )
+            if not scoring["behavior_change"]:
+                updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
+                self._refresh_behavioral_profile(updated_transactions)
+
+            return {
+                "behavior_score": scoring["behavior_score"],
+                "behavior_change": scoring["behavior_change"],
+                "reasons": scoring["behavior_reasons"],
+            }
+
+        baseline, _ = self._split_baseline_and_anomalous(transactions)
+        if baseline.empty:
+            scoring = self._build_cold_start_scoring(impossible_travel_context, cold_start_status)
+            action = self._lookup_action_mapping(scoring["behavior_change"])
+            self._persist_scored_transaction(
+                transaction_payload=transaction_payload,
+                scoring=scoring,
+                action_mapping=action,
+            )
+            if not scoring["behavior_change"]:
+                updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
+                self._refresh_behavioral_profile(updated_transactions)
+
+            return {
+                "behavior_score": scoring["behavior_score"],
+                "behavior_change": scoring["behavior_change"],
+                "reasons": scoring["behavior_reasons"],
+            }
+
+        baseline_features = self._build_baseline_feature_matrix(baseline)
+        self.model.fit(baseline_features[self._feature_columns(baseline_features)])
+        try:
+            profile = self._load_behavioral_profile(transaction_payload["account_id"])
+        except ValueError:
+            self._refresh_behavioral_profile(transactions)
+            profile = self._load_behavioral_profile(transaction_payload["account_id"])
         candidate_features = self._build_single_target_feature_matrix(
             baseline_reference=baseline,
             historical_transactions=transactions,
             target_transaction=candidate_frame,
         )
         candidate_row = candidate_features.iloc[0]
-        previous_transaction = self.feature_engineer.get_latest_transaction_for_account(transaction_payload["account_id"])
-        impossible_travel_context = self.feature_engineer.compute_impossible_travel(
-            current_transaction=candidate_frame.iloc[0].to_dict(),
-            previous_transaction=previous_transaction,
-        )
         scoring = self._compute_weighted_scores(
             baseline=baseline,
-            scored_row=candidate_frame.iloc[0],
+            scored_row=candidate_record,
             feature_row=candidate_row,
             baseline_features=baseline_features,
             profile=profile,
-            current_month_count=self._current_month_count(transactions, candidate_frame.iloc[0]) + 1,
-            current_day_count=self._current_day_count(transactions, candidate_frame.iloc[0]) + 1,
+            current_month_count=self._current_month_count(transactions, candidate_record) + 1,
+            current_day_count=self._current_day_count(transactions, candidate_record) + 1,
             impossible_travel_context=impossible_travel_context,
         )
         action = self._lookup_action_mapping(scoring["behavior_change"])
@@ -125,8 +191,9 @@ class HybridBehaviorScorer:
             scoring=scoring,
             action_mapping=action,
         )
-        updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
-        self._refresh_behavioral_profile(updated_transactions)
+        if not scoring["behavior_change"]:
+            updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
+            self._refresh_behavioral_profile(updated_transactions)
 
         return {
             "behavior_score": scoring["behavior_score"],
@@ -361,6 +428,34 @@ class HybridBehaviorScorer:
             target_frame=target_transaction,
             baseline_reference=baseline_reference,
         )
+
+    def _build_cold_start_scoring(
+        self,
+        impossible_travel_context: dict[str, Any] | None,
+        cold_start_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        behavior_change = bool(impossible_travel_context and impossible_travel_context.get("impossible_travel"))
+        reasons = ["IMPOSSIBLE_TRAVEL"] if behavior_change else []
+
+        return {
+            "model_score": 0.0,
+            "statistical_score": 0.0,
+            "feature_deviation_score": 0.0,
+            "behavior_score": 0.0,
+            "behavior_change": behavior_change,
+            "behavior_reasons": reasons,
+            "iforest_anomaly": False,
+            "amount_zscore": 0.0,
+            "daily_frequency_zscore": 0.0,
+            "monthly_frequency_zscore": 0.0,
+            "impossible_travel": behavior_change,
+            "distance_km": impossible_travel_context.get("distance_km") if impossible_travel_context else None,
+            "travel_speed_kmh": impossible_travel_context.get("travel_speed_kmh") if impossible_travel_context else None,
+            "travel_time_hours": impossible_travel_context.get("time_diff_hours") if impossible_travel_context else None,
+            "cold_start": True,
+            "cold_start_history_days": int(cold_start_status.get("history_days", 0)),
+            "cold_start_transaction_count": int(cold_start_status.get("transaction_count", 0)),
+        }
 
     def _build_feature_matrix_from_context(
         self,

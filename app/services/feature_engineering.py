@@ -18,48 +18,118 @@ class FeatureEngineeringResult:
 
 
 class BehavioralFeatureEngineer:
+    COLD_START_MIN_HISTORY_DAYS = 60
+    COLD_START_MIN_TRANSACTIONS = 12
+
     def __init__(self, account_id: str | None = None) -> None:
         self.account_id = account_id
 
     def load_raw_transactions(self) -> pd.DataFrame:
+        frame = self._load_transactions_frame(account_id=self.account_id, normal_only=False, allow_empty=False)
+        if frame.empty:
+            raise ValueError("No raw_transactions found for feature engineering.")
+        return frame
+
+    def load_account_transactions(self, account_id: str, normal_only: bool = False) -> pd.DataFrame:
+        return self._load_transactions_frame(account_id=account_id, normal_only=normal_only, allow_empty=True)
+
+    def assess_cold_start(
+        self,
+        historical_transactions: pd.DataFrame,
+        candidate_timestamp: pd.Timestamp | None = None,
+    ) -> dict[str, Any]:
+        if historical_transactions.empty:
+            return {
+                "is_cold_start": True,
+                "history_days": 0,
+                "transaction_count": 0,
+                "meets_time_threshold": False,
+                "meets_volume_threshold": False,
+            }
+
+        working = historical_transactions.sort_values("event_ts").copy()
+        oldest_ts = pd.Timestamp(working["event_ts"].min())
+        latest_reference = pd.Timestamp(candidate_timestamp) if candidate_timestamp is not None else pd.Timestamp(working["event_ts"].max())
+        history_days = max((latest_reference - oldest_ts).days, 0)
+        transaction_count = int(len(working))
+        meets_time_threshold = history_days > self.COLD_START_MIN_HISTORY_DAYS
+        meets_volume_threshold = transaction_count >= self.COLD_START_MIN_TRANSACTIONS
+
+        return {
+            "is_cold_start": not (meets_time_threshold and meets_volume_threshold),
+            "history_days": history_days,
+            "transaction_count": transaction_count,
+            "meets_time_threshold": meets_time_threshold,
+            "meets_volume_threshold": meets_volume_threshold,
+        }
+
+    def get_latest_transaction_for_account(self, account_id: str, normal_only: bool = False) -> dict[str, Any] | None:
+        frame = self._load_transactions_frame(account_id=account_id, normal_only=normal_only, allow_empty=True)
+        if frame.empty:
+            return None
+
+        row = frame.sort_values("event_ts", ascending=False).iloc[0]
+        return {
+            "event_id": str(row["event_id"]),
+            "event_ts": pd.Timestamp(row["event_ts"]),
+            "account_id": str(row["account_id"]),
+            "country": str(row["country"]),
+            "geo_coordinates": self._normalize_geo_coordinates(row.get("geo_coordinates")),
+        }
+
+    def _load_transactions_frame(
+        self,
+        account_id: str | None,
+        normal_only: bool,
+        allow_empty: bool,
+    ) -> pd.DataFrame:
         query = """
             SELECT
-                event_id,
-                event_ts,
-                account_id,
-                instrument_id,
-                amount,
-                currency,
-                country,
-                mcc,
-                merchant_id,
-                entry_mode,
-                ip,
-                device_fingerprint,
-                terminal_id,
-                txn_type,
-                geo_coordinates
-            FROM raw_transactions
+                rt.event_id,
+                rt.event_ts,
+                rt.account_id,
+                rt.instrument_id,
+                rt.amount,
+                rt.currency,
+                rt.country,
+                rt.mcc,
+                rt.merchant_id,
+                rt.entry_mode,
+                rt.ip,
+                rt.device_fingerprint,
+                rt.terminal_id,
+                rt.txn_type,
+                rt.geo_coordinates
+            FROM raw_transactions rt
+            LEFT JOIN scoring_results sr ON rt.event_id = sr.event_id
             {where_clause}
-            ORDER BY event_ts
+            ORDER BY rt.event_ts
         """
+        filters: list[str] = []
+        params: dict[str, object] = {}
+        if account_id:
+            filters.append("rt.account_id = :account_id")
+            params["account_id"] = account_id
+        if normal_only:
+            filters.append("COALESCE(sr.behavior_change, FALSE) = FALSE")
+
         where_clause = ""
-        params: dict[str, object] | None = None
-        if self.account_id:
-            where_clause = "WHERE account_id = :account_id"
-            params = {"account_id": self.account_id}
+        if filters:
+            where_clause = "WHERE " + " AND ".join(filters)
 
         engine = get_sqlalchemy_engine()
         try:
             frame = pd.read_sql_query(
                 text(query.format(where_clause=where_clause)),
                 engine,
-                params=params,
+                params=params or None,
             )
         finally:
             engine.dispose()
 
         if frame.empty:
+            if allow_empty:
+                return frame
             raise ValueError("No raw_transactions found for feature engineering.")
 
         frame["event_ts"] = pd.to_datetime(frame["event_ts"], utc=False)
@@ -67,39 +137,6 @@ class BehavioralFeatureEngineer:
         if "geo_coordinates" in frame.columns:
             frame["geo_coordinates"] = frame["geo_coordinates"].apply(self._normalize_geo_coordinates)
         return frame
-
-    def get_latest_transaction_for_account(self, account_id: str) -> dict[str, Any] | None:
-        engine = get_sqlalchemy_engine()
-        query = text(
-            """
-            SELECT
-                event_id,
-                event_ts,
-                account_id,
-                country,
-                geo_coordinates
-            FROM raw_transactions
-            WHERE account_id = :account_id
-            ORDER BY event_ts DESC
-            LIMIT 1
-            """
-        )
-        try:
-            with engine.begin() as connection:
-                row = connection.execute(query, {"account_id": account_id}).mappings().first()
-        finally:
-            engine.dispose()
-
-        if row is None:
-            return None
-
-        return {
-            "event_id": str(row["event_id"]),
-            "event_ts": pd.Timestamp(row["event_ts"]),
-            "account_id": str(row["account_id"]),
-            "country": str(row["country"]),
-            "geo_coordinates": self._normalize_geo_coordinates(row["geo_coordinates"]),
-        }
 
     def compute_impossible_travel(
         self,
@@ -147,7 +184,16 @@ class BehavioralFeatureEngineer:
         if transactions.empty:
             raise ValueError("No transactions available for continuous profile update.")
 
-        profile_result = self._build_grouped_results(transactions.copy(), use_baseline_window=False)
+        working = transactions.copy()
+        if "event_ts" in working.columns:
+            working["event_ts"] = pd.to_datetime(working["event_ts"], utc=False, errors="coerce")
+        if "amount" in working.columns:
+            working["amount"] = pd.to_numeric(working["amount"], errors="coerce")
+        working = working.dropna(subset=["event_ts", "amount"])
+        if working.empty:
+            raise ValueError("No valid transactions available for continuous profile update.")
+
+        profile_result = self._build_grouped_results(working, use_baseline_window=False)
         return profile_result.profile_frame
 
     def upsert_behavioral_profile(self, profile_frame: pd.DataFrame) -> None:
