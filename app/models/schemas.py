@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -53,3 +53,38 @@ class BehaviorScoringResponse(BaseModel):
     behavior_score: float
     behavior_change: bool
     reasons: list[str]
+
+
+class BulkSimulationRequest(BaseModel):
+    customers: int = Field(5, ge=1, le=50)
+    months: int = Field(4, ge=3, le=6)
+    seed: int = Field(42, ge=0)
+    inject_time_shift: bool = True
+    inject_amount_spike: bool = False
+    inject_new_ip: bool = False
+    output: Literal["csv", "postgres", "both", "memory"] = "postgres"
+
+
+class ResetRequest(BaseModel):
+    confirm: bool = True
+
+
+class AccountRequest(BaseModel):
+    account_id: str
+
+
+class RulesRetrieveRequest(BaseModel):
+    behavior_change_flag: bool | None = None
+
+
+class ConfigRuleMapping(BaseModel):
+    behavior_change_flag: bool
+    action_mapping: str = Field(..., min_length=1, max_length=16)
+
+
+class RulesUpdateRequest(BaseModel):
+    rules: list[ConfigRuleMapping]
+
+
+class ApiEnvelope(BaseModel):
+    data: Any

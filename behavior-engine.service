@@ -1,0 +1,16 @@
+[Unit]
+Description=Behavior Engine FastAPI Service
+After=network.target
+
+[Service]
+Type=simple
+User=innovitegra
+Group=innovitegra
+WorkingDirectory=/home/innovitegra/Desktop/BehaviorEngine
+EnvironmentFile=/home/innovitegra/Desktop/BehaviorEngine/.env
+ExecStart=/home/innovitegra/Desktop/BehaviorEngine/venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -17,3 +17,6 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_HOST = os.getenv("DB_HOST", "")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "behaviour_db")
+
+API_BASIC_AUTH_USERNAME = os.getenv("API_BASIC_AUTH_USERNAME", "admin")
+API_BASIC_AUTH_PASSWORD = os.getenv("API_BASIC_AUTH_PASSWORD", "change-me")

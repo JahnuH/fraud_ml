@@ -1,0 +1,313 @@
+Behavioral Anomaly Detection API
+================================
+
+Base URL
+--------
+http://<host>:8000
+
+Authentication
+--------------
+- Public endpoint:
+  - GET /health
+- All other endpoints require HTTP Basic Authentication.
+- Credentials are read from:
+  - API_BASIC_AUTH_USERNAME
+  - API_BASIC_AUTH_PASSWORD
+
+
+1. Health Check
+---------------
+Endpoint:
+GET /health
+
+Sample Response:
+{
+  "status": "ok"
+}
+
+
+2. Score Behavior
+-----------------
+Endpoint:
+POST /score-behavior
+
+Sample Request:
+{
+  "account_id": "ACC1000001",
+  "event_ts": "2026-05-07T10:15:00",
+  "amount": 1250.50,
+  "event_id": "1e5f9d7c-0d78-4ab1-9d0c-5bb7f5b3fd11",
+  "instrument_id": "CARD5000001",
+  "currency": "INR",
+  "country": "IN",
+  "mcc": "5411",
+  "merchant_id": "MERGROC-210",
+  "entry_mode": "CHIP",
+  "ip": "49.43.12.110",
+  "device_fingerprint": "devfp-0a91cd73",
+  "terminal_id": "TERM-2101",
+  "txn_type": "PURCHASE",
+  "geo_coordinates": [12.9716, 77.5946]
+}
+
+Sample Response:
+{
+  "behavior_score": 0.1842,
+  "behavior_change": false,
+  "reasons": []
+}
+
+
+3. Bulk Simulation
+------------------
+Endpoint:
+POST /simulate/bulk
+
+Sample Request:
+{
+  "customers": 5,
+  "months": 4,
+  "seed": 42,
+  "inject_time_shift": true,
+  "inject_amount_spike": false,
+  "inject_new_ip": false,
+  "output": "postgres"
+}
+
+Sample Response:
+{
+  "summary": {
+    "customers": 5,
+    "months": 4,
+    "total_transactions": 286,
+    "baseline_transactions": 136,
+    "anomalous_transactions": 150,
+    "anomalies_enabled": true,
+    "inject_time_shift": true,
+    "inject_amount_spike": false,
+    "inject_new_ip": false
+  },
+  "feature_summary": {
+    "baseline_transactions_used": 136,
+    "profiles_written": 5
+  },
+  "scoring_summary": {
+    "baseline_transactions": 136,
+    "anomalous_transactions": 150,
+    "monthly_summary": [
+      {
+        "account_id": "ACC1000001",
+        "anomalous_month": "2026-05",
+        "baseline_avg_monthly_txn_count": 13.0,
+        "anomalous_month_txn_count": 50,
+        "avg_behavior_score": 0.4621,
+        "flagged_transactions": 8,
+        "reasons": ["FREQUENCY_SPIKE", "UNUSUAL_TIME"]
+      }
+    ]
+  }
+}
+
+
+4. Reset Simulation Data
+------------------------
+Endpoint:
+POST /simulate/reset
+
+Sample Request:
+{
+  "confirm": true
+}
+
+Sample Response:
+{
+  "status": "ok",
+  "message": "Simulation tables cleared."
+}
+
+
+5. Metrics Summary
+------------------
+Endpoint:
+POST /metrics/summary
+
+Sample Request:
+{
+  "account_id": "ACC1000001"
+}
+
+Sample Response:
+{
+  "summary": {
+    "account_id": "ACC1000001",
+    "total_transactions": 63,
+    "average_amount": 1842.27,
+    "flagged_transactions": 4,
+    "average_behavior_score": 0.2419
+  },
+  "reason_counts": [
+    {
+      "reason": "FREQUENCY_SPIKE",
+      "count": 3
+    },
+    {
+      "reason": "UNUSUAL_TIME",
+      "count": 1
+    }
+  ]
+}
+
+
+6. Retrieve Behavioral Profile
+------------------------------
+Endpoint:
+POST /profile/retrieve
+
+Sample Request:
+{
+  "account_id": "ACC1000001"
+}
+
+Sample Response:
+{
+  "profile": {
+    "account_id": "ACC1000001",
+    "avg_amount": 1734.25,
+    "std_amount": 488.11,
+    "txn_frequency": 1.4286,
+    "active_hours": [9, 10, 11, 8, 7, 6],
+    "device_list": ["devfp-0a91cd73"],
+    "location_profile": ["IN"]
+  }
+}
+
+
+7. Transaction History
+----------------------
+Endpoint:
+POST /transactions/history
+
+Sample Request:
+{
+  "account_id": "ACC1000001"
+}
+
+Sample Response:
+{
+  "transactions": [
+    {
+      "event_id": "1e5f9d7c-0d78-4ab1-9d0c-5bb7f5b3fd11",
+      "event_ts": "2026-05-07T10:15:00",
+      "account_id": "ACC1000001",
+      "instrument_id": "CARD5000001",
+      "amount": 1250.5,
+      "currency": "INR",
+      "country": "IN",
+      "mcc": "5411",
+      "merchant_id": "MERGROC-210",
+      "entry_mode": "CHIP",
+      "ip": "49.43.12.110",
+      "device_fingerprint": "devfp-0a91cd73",
+      "terminal_id": "TERM-2101",
+      "txn_type": "PURCHASE",
+      "geo_coordinates": [12.9716, 77.5946],
+      "behavior_score": 0.1842,
+      "behavior_change": false,
+      "behavior_reasons": []
+    }
+  ]
+}
+
+
+8. Scoring Results
+------------------
+Endpoint:
+POST /scoring-results
+
+Sample Request:
+{
+  "account_id": "ACC1000001"
+}
+
+Sample Response:
+{
+  "scoring_results": [
+    {
+      "account_id": "ACC1000001",
+      "event_id": "1e5f9d7c-0d78-4ab1-9d0c-5bb7f5b3fd11",
+      "event_ts": "2026-05-07T10:15:00",
+      "behavior_score": 0.1842,
+      "behavior_change": false,
+      "behavior_reasons": []
+    }
+  ]
+}
+
+
+9. Retrieve Config Rules
+------------------------
+Endpoint:
+POST /config/rules/retrieve
+
+Sample Request:
+{
+  "behavior_change_flag": true
+}
+
+Sample Response:
+{
+  "rules": [
+    {
+      "behavior_change_flag": true,
+      "action_mapping": "ALERT"
+    }
+  ]
+}
+
+Alternative Sample Request:
+{
+}
+
+
+10. Update Config Rules
+-----------------------
+Endpoint:
+POST /config/rules/update
+
+Sample Request:
+{
+  "rules": [
+    {
+      "behavior_change_flag": false,
+      "action_mapping": "ALLOW"
+    },
+    {
+      "behavior_change_flag": true,
+      "action_mapping": "ALERT"
+    }
+  ]
+}
+
+Sample Response:
+{
+  "status": "ok",
+  "updated_rules": [
+    {
+      "behavior_change_flag": false,
+      "action_mapping": "ALLOW"
+    },
+    {
+      "behavior_change_flag": true,
+      "action_mapping": "ALERT"
+    }
+  ]
+}
+
+
+Notes
+-----
+- All protected endpoints accept JSON request bodies only.
+- account_id, event_ts, and amount are mandatory only for POST /score-behavior.
+- Other contextual transaction fields are optional and may be sent as null.
+- Missing categorical values are imputed server-side.
+- If event_id is omitted in POST /score-behavior, the backend generates one automatically.

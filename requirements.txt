@@ -6,8 +6,3 @@ scikit-learn
 psycopg2-binary
 python-dotenv
 sqlalchemy
-streamlit
-plotly
-requests
-folium
-streamlit-folium
