@@ -20,7 +20,7 @@ from app.db.postgres import get_sqlalchemy_engine
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_API_BASE = "http://127.0.0.1:8000"
-COUNTRY_CODES = ["IN", "US", "UK", "SG", "AE", "CA", "AU", "DE", "FR", "JP"]
+COUNTRY_CODES = ["", "IN", "US", "UK", "SG", "AE", "CA", "AU", "DE", "FR", "JP"]
 
 
 st.set_page_config(page_title="Behavioral Anomaly Testing UI", layout="wide")
@@ -138,6 +138,11 @@ def parse_reason_array(value) -> list[str]:
             return []
         return [part.strip().strip('"') for part in cleaned.split(",") if part.strip()]
     return [str(value)]
+
+
+def empty_to_none(value: str) -> str | None:
+    cleaned = value.strip()
+    return cleaned if cleaned else None
 
 
 def load_visualization_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -270,17 +275,17 @@ def render_single_transaction_tester() -> None:
             "event_id": event_id,
             "event_ts": event_ts,
             "account_id": account_id,
-            "instrument_id": instrument_id,
+            "instrument_id": empty_to_none(instrument_id),
             "amount": float(amount),
-            "currency": "INR",
-            "country": country,
-            "mcc": mcc,
-            "merchant_id": merchant_id,
-            "entry_mode": entry_mode,
-            "ip": ip,
-            "device_fingerprint": device_fingerprint,
-            "terminal_id": terminal_id,
-            "txn_type": txn_type,
+            "currency": empty_to_none("INR"),
+            "country": empty_to_none(country),
+            "mcc": empty_to_none(mcc),
+            "merchant_id": empty_to_none(merchant_id),
+            "entry_mode": empty_to_none(entry_mode),
+            "ip": empty_to_none(ip),
+            "device_fingerprint": empty_to_none(device_fingerprint),
+            "terminal_id": empty_to_none(terminal_id),
+            "txn_type": empty_to_none(txn_type),
             "geo_coordinates": geo_coordinates,
         }
         try:

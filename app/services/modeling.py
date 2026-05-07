@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 from sklearn.ensemble import IsolationForest
@@ -26,6 +27,8 @@ class HybridBehaviorScorer:
     STATISTICAL_WEIGHT = 0.50
     FEATURE_DEVIATION_WEIGHT = 0.15
     BEHAVIOR_CHANGE_THRESHOLD = 0.65
+    HARD_POISONING_REASONS = {"IMPOSSIBLE_TRAVEL"}
+    ACTIVE_HOUR_TOLERANCE = 2
 
     def __init__(self, account_id: str | None = None, contamination: float = 0.1, random_state: int = 42) -> None:
         self.account_id = account_id
@@ -81,9 +84,10 @@ class HybridBehaviorScorer:
         )
 
     def score_realtime_transaction(self, transaction_payload: dict[str, Any]) -> dict[str, Any]:
+        transaction_payload = self._normalize_realtime_payload(transaction_payload)
         transactions = self.feature_engineer.load_account_transactions(
             account_id=str(transaction_payload["account_id"]),
-            normal_only=True,
+            exclude_impossible_travel=True,
         )
         candidate_frame = pd.DataFrame([transaction_payload]).copy()
         candidate_frame["event_ts"] = pd.to_datetime(candidate_frame["event_ts"], utc=False)
@@ -92,6 +96,7 @@ class HybridBehaviorScorer:
             candidate_frame["geo_coordinates"] = candidate_frame["geo_coordinates"].apply(
                 self.feature_engineer._normalize_geo_coordinates
             )
+        candidate_frame = self.feature_engineer.normalize_transaction_frame(candidate_frame)
         candidate_record = candidate_frame.iloc[0]
 
         if transactions.empty:
@@ -115,7 +120,7 @@ class HybridBehaviorScorer:
 
         previous_transaction = self.feature_engineer.get_latest_transaction_for_account(
             transaction_payload["account_id"],
-            normal_only=True,
+            exclude_impossible_travel=True,
         )
         impossible_travel_context = self.feature_engineer.compute_impossible_travel(
             current_transaction=candidate_record.to_dict(),
@@ -133,7 +138,7 @@ class HybridBehaviorScorer:
                 scoring=scoring,
                 action_mapping=action,
             )
-            if not scoring["behavior_change"]:
+            if self._should_update_behavioral_profile(scoring["behavior_reasons"]):
                 updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
                 self._refresh_behavioral_profile(updated_transactions)
 
@@ -152,7 +157,7 @@ class HybridBehaviorScorer:
                 scoring=scoring,
                 action_mapping=action,
             )
-            if not scoring["behavior_change"]:
+            if self._should_update_behavioral_profile(scoring["behavior_reasons"]):
                 updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
                 self._refresh_behavioral_profile(updated_transactions)
 
@@ -191,7 +196,7 @@ class HybridBehaviorScorer:
             scoring=scoring,
             action_mapping=action,
         )
-        if not scoring["behavior_change"]:
+        if self._should_update_behavioral_profile(scoring["behavior_reasons"]):
             updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
             self._refresh_behavioral_profile(updated_transactions)
 
@@ -301,11 +306,12 @@ class HybridBehaviorScorer:
         known_devices = set(str(device) for device in profile.get("device_list", []))
         known_locations = set(str(country) for country in profile.get("location_profile", []))
         event_hour = int(pd.Timestamp(scored_row["event_ts"]).hour)
+        hour_distance = self._minimum_cyclical_hour_distance(event_hour, active_hours)
 
         amount_component = min(max(amount_zscore, 0.0) / 3.0, 1.0)
         daily_frequency_component = min(max(daily_frequency_zscore, 0.0) / 3.0, 1.0)
         monthly_frequency_component = min(max(monthly_frequency_zscore, 0.0) / 3.0, 1.0)
-        unusual_time_component = 1.0 if active_hours and event_hour not in active_hours else 0.0
+        unusual_time_component = 1.0 if hour_distance is not None and hour_distance > self.ACTIVE_HOUR_TOLERANCE else 0.0
 
         statistical_score = round(
             (
@@ -374,6 +380,7 @@ class HybridBehaviorScorer:
             "amount_zscore": round(float(amount_zscore), 4),
             "daily_frequency_zscore": round(float(daily_frequency_zscore), 4),
             "monthly_frequency_zscore": round(float(monthly_frequency_zscore), 4),
+            "active_hour_distance": hour_distance,
             "impossible_travel": bool(impossible_travel_context.get("impossible_travel", False))
             if impossible_travel_context
             else False,
@@ -700,6 +707,35 @@ class HybridBehaviorScorer:
     def _refresh_behavioral_profile(self, transactions: pd.DataFrame) -> None:
         updated_profile = self.feature_engineer.build_continuous_profile(transactions)
         self.feature_engineer.upsert_behavioral_profile(updated_profile)
+
+    def _should_update_behavioral_profile(self, reasons: list[str]) -> bool:
+        return not any(reason in self.HARD_POISONING_REASONS for reason in reasons)
+
+    def _normalize_realtime_payload(self, transaction_payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(transaction_payload)
+        normalized["event_id"] = normalized.get("event_id") or str(uuid4())
+        normalized["instrument_id"] = self.feature_engineer._normalize_string_field(normalized.get("instrument_id"))
+        normalized["currency"] = self.feature_engineer._normalize_string_field(normalized.get("currency"))
+        normalized["country"] = self.feature_engineer._normalize_string_field(normalized.get("country"))
+        normalized["mcc"] = self.feature_engineer._normalize_string_field(normalized.get("mcc"))
+        normalized["merchant_id"] = self.feature_engineer._normalize_string_field(normalized.get("merchant_id"))
+        normalized["entry_mode"] = self.feature_engineer._normalize_string_field(normalized.get("entry_mode"))
+        normalized["ip"] = self.feature_engineer._normalize_ip_field(normalized.get("ip"))
+        normalized["device_fingerprint"] = self.feature_engineer._normalize_string_field(
+            normalized.get("device_fingerprint")
+        )
+        normalized["terminal_id"] = self.feature_engineer._normalize_string_field(normalized.get("terminal_id"))
+        normalized["txn_type"] = self.feature_engineer._normalize_string_field(normalized.get("txn_type"))
+        normalized["geo_coordinates"] = self.feature_engineer._normalize_geo_coordinates(
+            normalized.get("geo_coordinates")
+        )
+        return normalized
+
+    @staticmethod
+    def _minimum_cyclical_hour_distance(event_hour: int, active_hours: set[int]) -> int | None:
+        if not active_hours:
+            return None
+        return min(min(abs(event_hour - hour), 24 - abs(event_hour - hour)) for hour in active_hours)
 
     @staticmethod
     def _current_month_count(transactions: pd.DataFrame, candidate_row: pd.Series) -> int:

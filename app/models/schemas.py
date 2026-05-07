@@ -32,20 +32,20 @@ class SimulationSummary(BaseModel):
 
 
 class BehaviorScoringRequest(BaseModel):
-    event_id: str
+    event_id: str | None = None
     event_ts: datetime
     account_id: str
-    instrument_id: str
+    instrument_id: str | None = None
     amount: float = Field(..., gt=0)
-    currency: str
-    country: str
-    mcc: str
-    merchant_id: str
-    entry_mode: str
-    ip: str
-    device_fingerprint: str
-    terminal_id: str
-    txn_type: str
+    currency: str | None = None
+    country: str | None = None
+    mcc: str | None = None
+    merchant_id: str | None = None
+    entry_mode: str | None = None
+    ip: str | None = None
+    device_fingerprint: str | None = None
+    terminal_id: str | None = None
+    txn_type: str | None = None
     geo_coordinates: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
 

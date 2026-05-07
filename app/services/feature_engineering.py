@@ -20,18 +20,33 @@ class FeatureEngineeringResult:
 class BehavioralFeatureEngineer:
     COLD_START_MIN_HISTORY_DAYS = 60
     COLD_START_MIN_TRANSACTIONS = 12
+    HARD_POISONING_REASON = "IMPOSSIBLE_TRAVEL"
+    UNKNOWN_TOKEN = "UNKNOWN"
+    UNKNOWN_IP = "0.0.0.0"
 
     def __init__(self, account_id: str | None = None) -> None:
         self.account_id = account_id
 
     def load_raw_transactions(self) -> pd.DataFrame:
-        frame = self._load_transactions_frame(account_id=self.account_id, normal_only=False, allow_empty=False)
+        frame = self._load_transactions_frame(
+            account_id=self.account_id,
+            exclude_impossible_travel=False,
+            allow_empty=False,
+        )
         if frame.empty:
             raise ValueError("No raw_transactions found for feature engineering.")
         return frame
 
-    def load_account_transactions(self, account_id: str, normal_only: bool = False) -> pd.DataFrame:
-        return self._load_transactions_frame(account_id=account_id, normal_only=normal_only, allow_empty=True)
+    def load_account_transactions(
+        self,
+        account_id: str,
+        exclude_impossible_travel: bool = False,
+    ) -> pd.DataFrame:
+        return self._load_transactions_frame(
+            account_id=account_id,
+            exclude_impossible_travel=exclude_impossible_travel,
+            allow_empty=True,
+        )
 
     def assess_cold_start(
         self,
@@ -63,8 +78,16 @@ class BehavioralFeatureEngineer:
             "meets_volume_threshold": meets_volume_threshold,
         }
 
-    def get_latest_transaction_for_account(self, account_id: str, normal_only: bool = False) -> dict[str, Any] | None:
-        frame = self._load_transactions_frame(account_id=account_id, normal_only=normal_only, allow_empty=True)
+    def get_latest_transaction_for_account(
+        self,
+        account_id: str,
+        exclude_impossible_travel: bool = False,
+    ) -> dict[str, Any] | None:
+        frame = self._load_transactions_frame(
+            account_id=account_id,
+            exclude_impossible_travel=exclude_impossible_travel,
+            allow_empty=True,
+        )
         if frame.empty:
             return None
 
@@ -80,7 +103,7 @@ class BehavioralFeatureEngineer:
     def _load_transactions_frame(
         self,
         account_id: str | None,
-        normal_only: bool,
+        exclude_impossible_travel: bool,
         allow_empty: bool,
     ) -> pd.DataFrame:
         query = """
@@ -110,8 +133,17 @@ class BehavioralFeatureEngineer:
         if account_id:
             filters.append("rt.account_id = :account_id")
             params["account_id"] = account_id
-        if normal_only:
-            filters.append("COALESCE(sr.behavior_change, FALSE) = FALSE")
+        if exclude_impossible_travel:
+            filters.append(
+                """
+                NOT (
+                    :hard_poisoning_reason = ANY(
+                        COALESCE(sr.behavior_reasons, ARRAY[]::TEXT[])
+                    )
+                )
+                """
+            )
+            params["hard_poisoning_reason"] = self.HARD_POISONING_REASON
 
         where_clause = ""
         if filters:
@@ -136,7 +168,7 @@ class BehavioralFeatureEngineer:
         frame["amount"] = pd.to_numeric(frame["amount"])
         if "geo_coordinates" in frame.columns:
             frame["geo_coordinates"] = frame["geo_coordinates"].apply(self._normalize_geo_coordinates)
-        return frame
+        return self.normalize_transaction_frame(frame)
 
     def compute_impossible_travel(
         self,
@@ -153,8 +185,10 @@ class BehavioralFeatureEngineer:
         if previous_transaction is None:
             return result
 
-        current_country = str(current_transaction.get("country", ""))
-        previous_country = str(previous_transaction.get("country", ""))
+        current_country = self._normalize_string_field(current_transaction.get("country"))
+        previous_country = self._normalize_string_field(previous_transaction.get("country"))
+        if current_country == self.UNKNOWN_TOKEN or previous_country == self.UNKNOWN_TOKEN:
+            return result
         if current_country == previous_country:
             return result
 
@@ -176,6 +210,33 @@ class BehavioralFeatureEngineer:
         result["travel_speed_kmh"] = round(travel_speed_kmh, 4)
         result["impossible_travel"] = travel_speed_kmh > max_speed_kmh
         return result
+
+    def normalize_transaction_frame(self, transactions: pd.DataFrame) -> pd.DataFrame:
+        if transactions.empty:
+            return transactions.copy()
+
+        normalized = transactions.copy()
+        string_defaults = {
+            "instrument_id": self.UNKNOWN_TOKEN,
+            "currency": self.UNKNOWN_TOKEN,
+            "country": self.UNKNOWN_TOKEN,
+            "mcc": self.UNKNOWN_TOKEN,
+            "merchant_id": self.UNKNOWN_TOKEN,
+            "entry_mode": self.UNKNOWN_TOKEN,
+            "device_fingerprint": self.UNKNOWN_TOKEN,
+            "terminal_id": self.UNKNOWN_TOKEN,
+            "txn_type": self.UNKNOWN_TOKEN,
+        }
+        for column, default_value in string_defaults.items():
+            if column in normalized.columns:
+                normalized[column] = normalized[column].apply(
+                    lambda value, fallback=default_value: self._normalize_string_field(value, fallback)
+                )
+
+        if "ip" in normalized.columns:
+            normalized["ip"] = normalized["ip"].apply(self._normalize_ip_field)
+
+        return normalized
 
     def build_features(self, transactions: pd.DataFrame) -> FeatureEngineeringResult:
         return self._build_grouped_results(transactions, use_baseline_window=True)
@@ -386,3 +447,16 @@ class BehavioralFeatureEngineer:
         a = sin(delta_lat / 2) ** 2 + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2) ** 2
         c = 2 * asin(sqrt(a))
         return radius_km * c
+
+    @classmethod
+    def _normalize_string_field(cls, value: Any, default: str | None = None) -> str:
+        fallback = default or cls.UNKNOWN_TOKEN
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return fallback
+        cleaned = str(value).strip()
+        return cleaned if cleaned else fallback
+
+    @classmethod
+    def _normalize_ip_field(cls, value: Any) -> str:
+        normalized = cls._normalize_string_field(value, cls.UNKNOWN_IP)
+        return normalized if normalized != cls.UNKNOWN_TOKEN else cls.UNKNOWN_IP
