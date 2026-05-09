@@ -7,12 +7,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.feature_engineering import BehavioralFeatureEngineer
+from app.services.feature_engineering import BehaviouralFeatureEngineer
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract behavioral features from baseline raw transactions and persist behavioral profiles."
+        description="Extract behavioural features from baseline raw transactions and persist behavioural profiles."
     )
     parser.add_argument("--account-id", default=None, help="Optional account_id filter.")
     parser.add_argument(
@@ -25,12 +25,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    engineer = BehavioralFeatureEngineer(account_id=args.account_id)
+    engineer = BehaviouralFeatureEngineer(account_id=args.account_id)
     transactions = engineer.load_raw_transactions()
     result = engineer.build_features(transactions)
-    engineer.persist_behavioral_profile(result.profile_frame)
+    engineer.persist_behavioural_profile(result.profile_frame)
 
-    print("Behavioral profile extracted successfully.")
+    print("Behavioural profile extracted successfully.")
     print(f"Baseline transactions used: {len(result.baseline_transactions)}")
     print(f"Profiles written: {len(result.profile_frame)}")
     print(f"Unique accounts processed: {result.profile_frame['account_id'].nunique()}")

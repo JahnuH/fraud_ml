@@ -12,33 +12,37 @@ from app.core.security import authenticate
 from app.db.postgres import get_sqlalchemy_engine
 from app.models.schemas import (
     AccountRequest,
-    BehaviorScoringRequest,
-    BehaviorScoringResponse,
+    BehaviourScoringRequest,
+    BehaviourScoringResponse,
     BulkSimulationRequest,
     ConfigRuleMapping,
     ResetRequest,
     RulesRetrieveRequest,
     RulesUpdateRequest,
 )
-from app.services.feature_engineering import BehavioralFeatureEngineer
-from app.services.modeling import HybridBehaviorScorer
+from app.services.feature_engineering import BehaviouralFeatureEngineer
+from app.services.modeling import HybridBehaviourScorer
 from app.services.simulator import generate_simulation_batch, persist_simulation_batch
 
 
-router = APIRouter(tags=["behavior-engine"], dependencies=[Depends(authenticate)])
+router = APIRouter(
+    prefix="/frms/behaviour",
+    tags=["behaviour-engine"],
+    dependencies=[Depends(authenticate)],
+)
 
 
-@router.post("/score-behavior", response_model=BehaviorScoringResponse)
-def score_behavior(request: BehaviorScoringRequest) -> BehaviorScoringResponse:
+@router.post("/score-behaviour", response_model=BehaviourScoringResponse)
+def score_behaviour(request: BehaviourScoringRequest) -> BehaviourScoringResponse:
     try:
-        scorer = HybridBehaviorScorer(account_id=request.account_id)
+        scorer = HybridBehaviourScorer(account_id=request.account_id)
         result = scorer.score_realtime_transaction(request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return BehaviorScoringResponse(
-        behavior_score=result["behavior_score"],
-        behavior_change=result["behavior_change"],
+    return BehaviourScoringResponse(
+        behaviour_score=result["behaviour_score"],
+        behaviour_change=result["behaviour_change"],
         reasons=result["reasons"],
     )
 
@@ -59,17 +63,17 @@ def simulate_bulk(request: BulkSimulationRequest) -> dict[str, object]:
         feature_summary: dict[str, object] | None = None
         scoring_summary: dict[str, object] | None = None
         if request.output in {"postgres", "both"}:
-            feature_engineer = BehavioralFeatureEngineer()
+            feature_engineer = BehaviouralFeatureEngineer()
             loaded_transactions = feature_engineer.load_raw_transactions()
             feature_result = feature_engineer.build_features(loaded_transactions)
-            feature_engineer.persist_behavioral_profile(feature_result.profile_frame)
+            feature_engineer.persist_behavioural_profile(feature_result.profile_frame)
             feature_summary = {
                 "baseline_transactions_used": int(len(feature_result.baseline_transactions)),
                 "profiles_written": int(len(feature_result.profile_frame)),
             }
 
             if summary["anomalies_enabled"]:
-                scorer = HybridBehaviorScorer()
+                scorer = HybridBehaviourScorer()
                 artifacts = scorer.run()
                 scorer.persist_scoring_results(artifacts.scored_transactions)
                 scoring_summary = {
@@ -94,7 +98,7 @@ def reset_simulation(request: ResetRequest) -> dict[str, object]:
 
     _execute_write(
         """
-        TRUNCATE TABLE raw_transactions, behavioral_profiles, scoring_results
+        TRUNCATE TABLE raw_transactions, behavioural_profiles, scoring_results
         RESTART IDENTITY CASCADE
         """
     )
@@ -109,8 +113,8 @@ def metrics_summary(request: AccountRequest) -> dict[str, object]:
             rt.account_id,
             COUNT(*) AS total_transactions,
             ROUND(AVG(rt.amount), 2) AS average_amount,
-            SUM(CASE WHEN COALESCE(sr.behavior_change, FALSE) THEN 1 ELSE 0 END) AS flagged_transactions,
-            ROUND(AVG(COALESCE(sr.behavior_score, 0)), 4) AS average_behavior_score
+            SUM(CASE WHEN COALESCE(sr.behaviour_change, FALSE) THEN 1 ELSE 0 END) AS flagged_transactions,
+            ROUND(AVG(COALESCE(sr.behaviour_score, 0))::numeric, 4) AS average_behaviour_score
         FROM raw_transactions rt
         LEFT JOIN scoring_results sr ON rt.event_id = sr.event_id
         WHERE rt.account_id = :account_id
@@ -122,7 +126,7 @@ def metrics_summary(request: AccountRequest) -> dict[str, object]:
         """
         SELECT reason, COUNT(*) AS count
         FROM (
-            SELECT UNNEST(COALESCE(sr.behavior_reasons, ARRAY[]::TEXT[])) AS reason
+            SELECT UNNEST(COALESCE(sr.behaviour_reasons, ARRAY[]::TEXT[])) AS reason
             FROM raw_transactions rt
             JOIN scoring_results sr ON rt.event_id = sr.event_id
             WHERE rt.account_id = :account_id
@@ -154,14 +158,14 @@ def retrieve_profile(request: AccountRequest) -> dict[str, object]:
             active_hours,
             device_list,
             location_profile
-        FROM behavioral_profiles
+        FROM behavioural_profiles
         WHERE account_id = :account_id
         LIMIT 1
         """,
         {"account_id": request.account_id},
     )
     if not rows:
-        raise HTTPException(status_code=404, detail=f"No behavioral profile found for account_id={request.account_id}.")
+        raise HTTPException(status_code=404, detail=f"No behavioural profile found for account_id={request.account_id}.")
     return {"profile": rows[0]}
 
 
@@ -185,9 +189,9 @@ def transaction_history(request: AccountRequest) -> dict[str, object]:
             rt.terminal_id,
             rt.txn_type,
             rt.geo_coordinates,
-            sr.behavior_score,
-            sr.behavior_change,
-            sr.behavior_reasons
+            sr.behaviour_score,
+            sr.behaviour_change,
+            sr.behaviour_reasons
         FROM raw_transactions rt
         LEFT JOIN scoring_results sr ON rt.event_id = sr.event_id
         WHERE rt.account_id = :account_id
@@ -206,9 +210,9 @@ def scoring_results(request: AccountRequest) -> dict[str, object]:
             rt.account_id,
             sr.event_id,
             rt.event_ts,
-            sr.behavior_score,
-            sr.behavior_change,
-            sr.behavior_reasons
+            sr.behaviour_score,
+            sr.behaviour_change,
+            sr.behaviour_reasons
         FROM scoring_results sr
         JOIN raw_transactions rt ON rt.event_id = sr.event_id
         WHERE rt.account_id = :account_id
@@ -223,18 +227,18 @@ def scoring_results(request: AccountRequest) -> dict[str, object]:
 def retrieve_config_rules(request: RulesRetrieveRequest) -> dict[str, object]:
     params: dict[str, object] = {}
     where_clause = ""
-    if request.behavior_change_flag is not None:
-        where_clause = "WHERE behavior_change_flag = :behavior_change_flag"
-        params["behavior_change_flag"] = request.behavior_change_flag
+    if request.behaviour_change_flag is not None:
+        where_clause = "WHERE behaviour_change_flag = :behaviour_change_flag"
+        params["behaviour_change_flag"] = request.behaviour_change_flag
 
     rows = _fetch_rows(
         f"""
         SELECT
-            behavior_change_flag,
+            behaviour_change_flag,
             action_mapping
-        FROM behavioral_config
+        FROM behavioural_config
         {where_clause}
-        ORDER BY behavior_change_flag
+        ORDER BY behaviour_change_flag
         """,
         params,
     )
@@ -248,14 +252,14 @@ def update_config_rules(request: RulesUpdateRequest) -> dict[str, object]:
 
     records = [rule.model_dump() for rule in request.rules]
     engine = get_sqlalchemy_engine()
-    truncate_query = text("TRUNCATE TABLE behavioral_config")
+    truncate_query = text("TRUNCATE TABLE behavioural_config")
     insert_query = text(
         """
-        INSERT INTO behavioral_config (
-            behavior_change_flag,
+        INSERT INTO behavioural_config (
+            behaviour_change_flag,
             action_mapping
         ) VALUES (
-            :behavior_change_flag,
+            :behaviour_change_flag,
             :action_mapping
         )
         """

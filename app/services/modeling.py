@@ -9,7 +9,7 @@ from sklearn.ensemble import IsolationForest
 from sqlalchemy import text
 
 from app.db.postgres import get_postgres_connection, get_sqlalchemy_engine
-from app.services.feature_engineering import BehavioralFeatureEngineer
+from app.services.feature_engineering import BehaviouralFeatureEngineer
 
 
 @dataclass
@@ -22,11 +22,11 @@ class ScoringArtifacts:
     monthly_summary: pd.DataFrame
 
 
-class HybridBehaviorScorer:
+class HybridBehaviourScorer:
     MODEL_WEIGHT = 0.35
     STATISTICAL_WEIGHT = 0.50
     FEATURE_DEVIATION_WEIGHT = 0.15
-    BEHAVIOR_CHANGE_THRESHOLD = 0.65
+    BEHAVIOUR_CHANGE_THRESHOLD = 0.65
     HARD_POISONING_REASONS = {"IMPOSSIBLE_TRAVEL"}
     ACTIVE_HOUR_TOLERANCE = 2
 
@@ -34,7 +34,7 @@ class HybridBehaviorScorer:
         self.account_id = account_id
         self.contamination = contamination
         self.random_state = random_state
-        self.feature_engineer = BehavioralFeatureEngineer(account_id=account_id)
+        self.feature_engineer = BehaviouralFeatureEngineer(account_id=account_id)
         self.model = IsolationForest(
             n_estimators=200,
             contamination=contamination,
@@ -105,7 +105,7 @@ class HybridBehaviorScorer:
                 candidate_timestamp=pd.Timestamp(candidate_record["event_ts"]),
             )
             scoring = self._build_cold_start_scoring(None, cold_start_status)
-            action = self._lookup_action_mapping(scoring["behavior_change"])
+            action = self._lookup_action_mapping(scoring["behaviour_change"])
             self._persist_scored_transaction(
                 transaction_payload=transaction_payload,
                 scoring=scoring,
@@ -113,9 +113,9 @@ class HybridBehaviorScorer:
             )
 
             return {
-                "behavior_score": scoring["behavior_score"],
-                "behavior_change": scoring["behavior_change"],
-                "reasons": scoring["behavior_reasons"],
+                "behaviour_score": scoring["behaviour_score"],
+                "behaviour_change": scoring["behaviour_change"],
+                "reasons": scoring["behaviour_reasons"],
             }
 
         previous_transaction = self.feature_engineer.get_latest_transaction_for_account(
@@ -132,48 +132,48 @@ class HybridBehaviorScorer:
         )
         if cold_start_status["is_cold_start"]:
             scoring = self._build_cold_start_scoring(impossible_travel_context, cold_start_status)
-            action = self._lookup_action_mapping(scoring["behavior_change"])
+            action = self._lookup_action_mapping(scoring["behaviour_change"])
             self._persist_scored_transaction(
                 transaction_payload=transaction_payload,
                 scoring=scoring,
                 action_mapping=action,
             )
-            if self._should_update_behavioral_profile(scoring["behavior_reasons"]):
+            if self._should_update_behavioural_profile(scoring["behaviour_reasons"]):
                 updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
-                self._refresh_behavioral_profile(updated_transactions)
+                self._refresh_behavioural_profile(updated_transactions)
 
             return {
-                "behavior_score": scoring["behavior_score"],
-                "behavior_change": scoring["behavior_change"],
-                "reasons": scoring["behavior_reasons"],
+                "behaviour_score": scoring["behaviour_score"],
+                "behaviour_change": scoring["behaviour_change"],
+                "reasons": scoring["behaviour_reasons"],
             }
 
         baseline, _ = self._split_baseline_and_anomalous(transactions)
         if baseline.empty:
             scoring = self._build_cold_start_scoring(impossible_travel_context, cold_start_status)
-            action = self._lookup_action_mapping(scoring["behavior_change"])
+            action = self._lookup_action_mapping(scoring["behaviour_change"])
             self._persist_scored_transaction(
                 transaction_payload=transaction_payload,
                 scoring=scoring,
                 action_mapping=action,
             )
-            if self._should_update_behavioral_profile(scoring["behavior_reasons"]):
+            if self._should_update_behavioural_profile(scoring["behaviour_reasons"]):
                 updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
-                self._refresh_behavioral_profile(updated_transactions)
+                self._refresh_behavioural_profile(updated_transactions)
 
             return {
-                "behavior_score": scoring["behavior_score"],
-                "behavior_change": scoring["behavior_change"],
-                "reasons": scoring["behavior_reasons"],
+                "behaviour_score": scoring["behaviour_score"],
+                "behaviour_change": scoring["behaviour_change"],
+                "reasons": scoring["behaviour_reasons"],
             }
 
         baseline_features = self._build_baseline_feature_matrix(baseline)
         self.model.fit(baseline_features[self._feature_columns(baseline_features)])
         try:
-            profile = self._load_behavioral_profile(transaction_payload["account_id"])
+            profile = self._load_behavioural_profile(transaction_payload["account_id"])
         except ValueError:
-            self._refresh_behavioral_profile(transactions)
-            profile = self._load_behavioral_profile(transaction_payload["account_id"])
+            self._refresh_behavioural_profile(transactions)
+            profile = self._load_behavioural_profile(transaction_payload["account_id"])
         candidate_features = self._build_single_target_feature_matrix(
             baseline_reference=baseline,
             historical_transactions=transactions,
@@ -190,25 +190,25 @@ class HybridBehaviorScorer:
             current_day_count=self._current_day_count(transactions, candidate_record) + 1,
             impossible_travel_context=impossible_travel_context,
         )
-        action = self._lookup_action_mapping(scoring["behavior_change"])
+        action = self._lookup_action_mapping(scoring["behaviour_change"])
         self._persist_scored_transaction(
             transaction_payload=transaction_payload,
             scoring=scoring,
             action_mapping=action,
         )
-        if self._should_update_behavioral_profile(scoring["behavior_reasons"]):
+        if self._should_update_behavioural_profile(scoring["behaviour_reasons"]):
             updated_transactions = pd.concat([transactions, candidate_frame], ignore_index=True)
-            self._refresh_behavioral_profile(updated_transactions)
+            self._refresh_behavioural_profile(updated_transactions)
 
         return {
-            "behavior_score": scoring["behavior_score"],
-            "behavior_change": scoring["behavior_change"],
-            "reasons": scoring["behavior_reasons"],
+            "behaviour_score": scoring["behaviour_score"],
+            "behaviour_change": scoring["behaviour_change"],
+            "reasons": scoring["behaviour_reasons"],
         }
 
     def persist_scoring_results(self, scored_transactions: pd.DataFrame) -> None:
         records = scored_transactions[
-            ["event_id", "behavior_score", "behavior_change", "behavior_reasons"]
+            ["event_id", "behaviour_score", "behaviour_change", "behaviour_reasons"]
         ].to_dict(orient="records")
 
         connection = get_postgres_connection()
@@ -219,14 +219,14 @@ class HybridBehaviorScorer:
                     """
                     INSERT INTO scoring_results (
                         event_id,
-                        behavior_score,
-                        behavior_change,
-                        behavior_reasons
+                        behaviour_score,
+                        behaviour_change,
+                        behaviour_reasons
                     ) VALUES (
                         %(event_id)s,
-                        %(behavior_score)s,
-                        %(behavior_change)s,
-                        %(behavior_reasons)s
+                        %(behaviour_score)s,
+                        %(behaviour_change)s,
+                        %(behaviour_reasons)s
                     )
                     """,
                     records,
@@ -243,7 +243,7 @@ class HybridBehaviorScorer:
         anomalous_features: pd.DataFrame,
     ) -> pd.DataFrame:
         self.model.fit(baseline_features[self._feature_columns(baseline_features)])
-        profile = self._load_behavioral_profile(str(baseline["account_id"].iloc[0]))
+        profile = self._load_behavioural_profile(str(baseline["account_id"].iloc[0]))
 
         scored = anomalous.copy().reset_index(drop=True)
         scored = scored.merge(anomalous_features, on="event_id", how="left")
@@ -333,7 +333,7 @@ class HybridBehaviorScorer:
             4,
         )
 
-        behavior_score = round(
+        behaviour_score = round(
             (
                 self.MODEL_WEIGHT * model_score
                 + self.STATISTICAL_WEIGHT * statistical_score
@@ -363,19 +363,19 @@ class HybridBehaviorScorer:
             reasons.append("IMPOSSIBLE_TRAVEL")
 
         major_reasons = {"AMOUNT_SPIKE", "FREQUENCY_SPIKE", "UNUSUAL_TIME"}
-        behavior_change = bool(
-            behavior_score >= self.BEHAVIOR_CHANGE_THRESHOLD or any(reason in major_reasons for reason in reasons)
+        behaviour_change = bool(
+            behaviour_score >= self.BEHAVIOUR_CHANGE_THRESHOLD or any(reason in major_reasons for reason in reasons)
         )
         if impossible_travel_context and impossible_travel_context.get("impossible_travel"):
-            behavior_change = True
+            behaviour_change = True
 
         return {
             "model_score": round(model_score, 4),
             "statistical_score": round(statistical_score, 4),
             "feature_deviation_score": round(feature_deviation_score, 4),
-            "behavior_score": behavior_score,
-            "behavior_change": behavior_change,
-            "behavior_reasons": reasons,
+            "behaviour_score": behaviour_score,
+            "behaviour_change": behaviour_change,
+            "behaviour_reasons": reasons,
             "iforest_anomaly": iforest_anomaly,
             "amount_zscore": round(float(amount_zscore), 4),
             "daily_frequency_zscore": round(float(daily_frequency_zscore), 4),
@@ -397,7 +397,7 @@ class HybridBehaviorScorer:
     ) -> pd.DataFrame:
         baseline_monthly_counts = baseline.groupby(baseline["event_ts"].dt.to_period("M")).size()
         anomalous_month = str(anomalous["event_ts"].dt.to_period("M").iloc[0])
-        reasons = sorted({reason for reasons in scored_transactions["behavior_reasons"] for reason in reasons})
+        reasons = sorted({reason for reasons in scored_transactions["behaviour_reasons"] for reason in reasons})
 
         return pd.DataFrame(
             [
@@ -406,8 +406,8 @@ class HybridBehaviorScorer:
                     "anomalous_month": anomalous_month,
                     "baseline_avg_monthly_txn_count": float(baseline_monthly_counts.mean()),
                     "anomalous_month_txn_count": int(len(anomalous)),
-                    "avg_behavior_score": float(scored_transactions["behavior_score"].mean()),
-                    "flagged_transactions": int(scored_transactions["behavior_change"].sum()),
+                    "avg_behaviour_score": float(scored_transactions["behaviour_score"].mean()),
+                    "flagged_transactions": int(scored_transactions["behaviour_change"].sum()),
                     "reasons": reasons,
                 }
             ]
@@ -441,21 +441,21 @@ class HybridBehaviorScorer:
         impossible_travel_context: dict[str, Any] | None,
         cold_start_status: dict[str, Any],
     ) -> dict[str, Any]:
-        behavior_change = bool(impossible_travel_context and impossible_travel_context.get("impossible_travel"))
-        reasons = ["IMPOSSIBLE_TRAVEL"] if behavior_change else []
+        behaviour_change = bool(impossible_travel_context and impossible_travel_context.get("impossible_travel"))
+        reasons = ["IMPOSSIBLE_TRAVEL"] if behaviour_change else []
 
         return {
             "model_score": 0.0,
             "statistical_score": 0.0,
             "feature_deviation_score": 0.0,
-            "behavior_score": 0.0,
-            "behavior_change": behavior_change,
-            "behavior_reasons": reasons,
+            "behaviour_score": 0.0,
+            "behaviour_change": behaviour_change,
+            "behaviour_reasons": reasons,
             "iforest_anomaly": False,
             "amount_zscore": 0.0,
             "daily_frequency_zscore": 0.0,
             "monthly_frequency_zscore": 0.0,
-            "impossible_travel": behavior_change,
+            "impossible_travel": behaviour_change,
             "distance_km": impossible_travel_context.get("distance_km") if impossible_travel_context else None,
             "travel_speed_kmh": impossible_travel_context.get("travel_speed_kmh") if impossible_travel_context else None,
             "travel_time_hours": impossible_travel_context.get("time_diff_hours") if impossible_travel_context else None,
@@ -536,7 +536,7 @@ class HybridBehaviorScorer:
             }
         )
 
-    def _load_behavioral_profile(self, account_id: str) -> dict[str, Any]:
+    def _load_behavioural_profile(self, account_id: str) -> dict[str, Any]:
         connection = get_postgres_connection()
         try:
             with connection.cursor() as cursor:
@@ -550,7 +550,7 @@ class HybridBehaviorScorer:
                         active_hours,
                         device_list,
                         location_profile
-                    FROM behavioral_profiles
+                    FROM behavioural_profiles
                     WHERE account_id = %s
                     """,
                     (account_id,),
@@ -560,7 +560,7 @@ class HybridBehaviorScorer:
             connection.close()
 
         if row is None:
-            raise ValueError(f"No behavioral profile found for account_id={account_id}.")
+            raise ValueError(f"No behavioural profile found for account_id={account_id}.")
 
         return {
             "account_id": row[0],
@@ -572,25 +572,25 @@ class HybridBehaviorScorer:
             "location_profile": row[6] or [],
         }
 
-    def _lookup_action_mapping(self, behavior_change: bool) -> str:
+    def _lookup_action_mapping(self, behaviour_change: bool) -> str:
         connection = get_postgres_connection()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     SELECT action_mapping
-                    FROM behavioral_config
-                    WHERE behavior_change_flag = %s
+                    FROM behavioural_config
+                    WHERE behaviour_change_flag = %s
                     LIMIT 1
                     """,
-                    (behavior_change,),
+                    (behaviour_change,),
                 )
                 row = cursor.fetchone()
         finally:
             connection.close()
 
         if row is None:
-            return "ALERT" if behavior_change else "ALLOW"
+            return "ALERT" if behaviour_change else "ALLOW"
         return str(row[0])
 
     def _persist_scored_transaction(
@@ -619,9 +619,9 @@ class HybridBehaviorScorer:
         }
         scoring_params = {
             "event_id": transaction_payload["event_id"],
-            "behavior_score": float(scoring["behavior_score"]),
-            "behavior_change": bool(scoring["behavior_change"]),
-            "behavior_reasons": list(scoring["behavior_reasons"]),
+            "behaviour_score": float(scoring["behaviour_score"]),
+            "behaviour_change": bool(scoring["behaviour_change"]),
+            "behaviour_reasons": list(scoring["behaviour_reasons"]),
         }
         _ = action_mapping
 
@@ -681,19 +681,19 @@ class HybridBehaviorScorer:
             """
             INSERT INTO scoring_results (
                 event_id,
-                behavior_score,
-                behavior_change,
-                behavior_reasons
+                behaviour_score,
+                behaviour_change,
+                behaviour_reasons
             ) VALUES (
                 :event_id,
-                :behavior_score,
-                :behavior_change,
-                :behavior_reasons
+                :behaviour_score,
+                :behaviour_change,
+                :behaviour_reasons
             )
             ON CONFLICT (event_id) DO UPDATE SET
-                behavior_score = EXCLUDED.behavior_score,
-                behavior_change = EXCLUDED.behavior_change,
-                behavior_reasons = EXCLUDED.behavior_reasons
+                behaviour_score = EXCLUDED.behaviour_score,
+                behaviour_change = EXCLUDED.behaviour_change,
+                behaviour_reasons = EXCLUDED.behaviour_reasons
             """
         )
 
@@ -704,11 +704,11 @@ class HybridBehaviorScorer:
         finally:
             engine.dispose()
 
-    def _refresh_behavioral_profile(self, transactions: pd.DataFrame) -> None:
+    def _refresh_behavioural_profile(self, transactions: pd.DataFrame) -> None:
         updated_profile = self.feature_engineer.build_continuous_profile(transactions)
-        self.feature_engineer.upsert_behavioral_profile(updated_profile)
+        self.feature_engineer.upsert_behavioural_profile(updated_profile)
 
-    def _should_update_behavioral_profile(self, reasons: list[str]) -> bool:
+    def _should_update_behavioural_profile(self, reasons: list[str]) -> bool:
         return not any(reason in self.HARD_POISONING_REASONS for reason in reasons)
 
     def _normalize_realtime_payload(self, transaction_payload: dict[str, Any]) -> dict[str, Any]:

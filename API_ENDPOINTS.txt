@@ -1,14 +1,14 @@
-Behavioral Anomaly Detection API
+Behavioural Anomaly Detection API
 ================================
 
 Base URL
 --------
-http://<host>:8000
+https://aml.innovitegra.in/frms/behaviour
 
 Authentication
 --------------
 - Public endpoint:
-  - GET /health
+  - GET /frms/behaviour/health
 - All other endpoints require HTTP Basic Authentication.
 - Credentials are read from:
   - API_BASIC_AUTH_USERNAME
@@ -18,18 +18,29 @@ Authentication
 1. Health Check
 ---------------
 Endpoint:
-GET /health
+GET /frms/behaviour/health
 
 Sample Response:
 {
-  "status": "ok"
+  "status": "ok",
+  "service": "frms-behaviour-engine",
+  "timestamp_utc": "2026-05-08T10:30:00+00:00",
+  "database": {
+    "status": "ok",
+    "table_counts": {
+      "raw_transactions": 286,
+      "behavioural_profiles": 5,
+      "scoring_results": 150,
+      "behavioural_config": 2
+    }
+  }
 }
 
 
-2. Score Behavior
+2. Score Behaviour
 -----------------
 Endpoint:
-POST /score-behavior
+POST /frms/behaviour/score-behaviour
 
 Sample Request:
 {
@@ -52,8 +63,8 @@ Sample Request:
 
 Sample Response:
 {
-  "behavior_score": 0.1842,
-  "behavior_change": false,
+  "behaviour_score": 0.1842,
+  "behaviour_change": false,
   "reasons": []
 }
 
@@ -61,14 +72,14 @@ Sample Response:
 3. Bulk Simulation
 ------------------
 Endpoint:
-POST /simulate/bulk
+POST /frms/behaviour/simulate/bulk
 
 Sample Request:
 {
   "customers": 5,
   "months": 4,
   "seed": 42,
-  "inject_time_shift": true,
+  "inject_time_shift": false,
   "inject_amount_spike": false,
   "inject_new_ip": false,
   "output": "postgres"
@@ -82,8 +93,8 @@ Sample Response:
     "total_transactions": 286,
     "baseline_transactions": 136,
     "anomalous_transactions": 150,
-    "anomalies_enabled": true,
-    "inject_time_shift": true,
+    "anomalies_enabled": false,
+    "inject_time_shift": false,
     "inject_amount_spike": false,
     "inject_new_ip": false
   },
@@ -100,7 +111,7 @@ Sample Response:
         "anomalous_month": "2026-05",
         "baseline_avg_monthly_txn_count": 13.0,
         "anomalous_month_txn_count": 50,
-        "avg_behavior_score": 0.4621,
+        "avg_behaviour_score": 0.4621,
         "flagged_transactions": 8,
         "reasons": ["FREQUENCY_SPIKE", "UNUSUAL_TIME"]
       }
@@ -112,7 +123,7 @@ Sample Response:
 4. Reset Simulation Data
 ------------------------
 Endpoint:
-POST /simulate/reset
+POST /frms/behaviour/simulate/reset
 
 Sample Request:
 {
@@ -129,7 +140,7 @@ Sample Response:
 5. Metrics Summary
 ------------------
 Endpoint:
-POST /metrics/summary
+POST /frms/behaviour/metrics/summary
 
 Sample Request:
 {
@@ -143,7 +154,7 @@ Sample Response:
     "total_transactions": 63,
     "average_amount": 1842.27,
     "flagged_transactions": 4,
-    "average_behavior_score": 0.2419
+    "average_behaviour_score": 0.2419
   },
   "reason_counts": [
     {
@@ -158,10 +169,10 @@ Sample Response:
 }
 
 
-6. Retrieve Behavioral Profile
+6. Retrieve Behavioural Profile
 ------------------------------
 Endpoint:
-POST /profile/retrieve
+POST /frms/behaviour/profile/retrieve
 
 Sample Request:
 {
@@ -185,7 +196,7 @@ Sample Response:
 7. Transaction History
 ----------------------
 Endpoint:
-POST /transactions/history
+POST /frms/behaviour/transactions/history
 
 Sample Request:
 {
@@ -211,9 +222,9 @@ Sample Response:
       "terminal_id": "TERM-2101",
       "txn_type": "PURCHASE",
       "geo_coordinates": [12.9716, 77.5946],
-      "behavior_score": 0.1842,
-      "behavior_change": false,
-      "behavior_reasons": []
+      "behaviour_score": 0.1842,
+      "behaviour_change": false,
+      "behaviour_reasons": []
     }
   ]
 }
@@ -222,7 +233,7 @@ Sample Response:
 8. Scoring Results
 ------------------
 Endpoint:
-POST /scoring-results
+POST /frms/behaviour/scoring-results
 
 Sample Request:
 {
@@ -236,9 +247,9 @@ Sample Response:
       "account_id": "ACC1000001",
       "event_id": "1e5f9d7c-0d78-4ab1-9d0c-5bb7f5b3fd11",
       "event_ts": "2026-05-07T10:15:00",
-      "behavior_score": 0.1842,
-      "behavior_change": false,
-      "behavior_reasons": []
+      "behaviour_score": 0.1842,
+      "behaviour_change": false,
+      "behaviour_reasons": []
     }
   ]
 }
@@ -247,18 +258,18 @@ Sample Response:
 9. Retrieve Config Rules
 ------------------------
 Endpoint:
-POST /config/rules/retrieve
+POST /frms/behaviour/config/rules/retrieve
 
 Sample Request:
 {
-  "behavior_change_flag": true
+  "behaviour_change_flag": true
 }
 
 Sample Response:
 {
   "rules": [
     {
-      "behavior_change_flag": true,
+      "behaviour_change_flag": true,
       "action_mapping": "ALERT"
     }
   ]
@@ -272,17 +283,17 @@ Alternative Sample Request:
 10. Update Config Rules
 -----------------------
 Endpoint:
-POST /config/rules/update
+POST /frms/behaviour/config/rules/update
 
 Sample Request:
 {
   "rules": [
     {
-      "behavior_change_flag": false,
+      "behaviour_change_flag": false,
       "action_mapping": "ALLOW"
     },
     {
-      "behavior_change_flag": true,
+      "behaviour_change_flag": true,
       "action_mapping": "ALERT"
     }
   ]
@@ -293,11 +304,11 @@ Sample Response:
   "status": "ok",
   "updated_rules": [
     {
-      "behavior_change_flag": false,
+      "behaviour_change_flag": false,
       "action_mapping": "ALLOW"
     },
     {
-      "behavior_change_flag": true,
+      "behaviour_change_flag": true,
       "action_mapping": "ALERT"
     }
   ]
@@ -307,7 +318,25 @@ Sample Response:
 Notes
 -----
 - All protected endpoints accept JSON request bodies only.
-- account_id, event_ts, and amount are mandatory only for POST /score-behavior.
+- account_id, event_ts, and amount are mandatory only for POST /score-behaviour.
 - Other contextual transaction fields are optional and may be sent as null.
 - Missing categorical values are imputed server-side.
-- If event_id is omitted in POST /score-behavior, the backend generates one automatically.
+- If event_id is omitted in POST /score-behaviour, the backend generates one automatically.
+
+
+--
+
+Behavioural Anomaly Detection APIs
+================================
+
+1. GET https://aml.innovitegra.in/frms/behaviour/health
+2. POST https://aml.innovitegra.in/frms/behaviour/score-behaviour
+3. POST https://aml.innovitegra.in/frms/behaviour/simulate/bulk
+4. POST https://aml.innovitegra.in/frms/behaviour/simulate/reset
+5. POST https://aml.innovitegra.in/frms/behaviour/metrics/summary
+6. POST https://aml.innovitegra.in/frms/behaviour/profile/retrieve
+7. POST https://aml.innovitegra.in/frms/behaviour/transactions/history
+8. POST https://aml.innovitegra.in/frms/behaviour/scoring-results
+9. POST https://aml.innovitegra.in/frms/behaviour/config/rules/retrieve
+10. POST https://aml.innovitegra.in/frms/behaviour/config/rules/update
+
