@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 
-from app.models.schemas import BehaviorScoringRequest, BehaviorScoringResponse
-from app.services.modeling import HybridBehaviorScorer
+from app.models.schemas import BehaviourScoringRequest, BehaviourScoringResponse
+from app.services.modeling import HybridBehaviourScorer
 from app.services.simulator import TransactionSimulator
 
 
@@ -30,16 +30,16 @@ def preview_simulation(
     }
 
 
-@router.post("/score-behavior", response_model=BehaviorScoringResponse)
-def score_behavior(request: BehaviorScoringRequest) -> BehaviorScoringResponse:
+@router.post("/score-behaviour", response_model=BehaviourScoringResponse)
+def score_behaviour(request: BehaviourScoringRequest) -> BehaviourScoringResponse:
     try:
-        scorer = HybridBehaviorScorer(account_id=request.account_id)
+        scorer = HybridBehaviourScorer(account_id=request.account_id)
         result = scorer.score_realtime_transaction(request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return BehaviorScoringResponse(
-        behavior_score=result["behavior_score"],
-        behavior_change=result["behavior_change"],
+    return BehaviourScoringResponse(
+        behaviour_score=result["behaviour_score"],
+        behaviour_change=result["behaviour_change"],
         reasons=result["reasons"],
     )

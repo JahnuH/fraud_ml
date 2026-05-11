@@ -17,7 +17,7 @@ class FeatureEngineeringResult:
     baseline_transactions: pd.DataFrame
 
 
-class BehavioralFeatureEngineer:
+class BehaviouralFeatureEngineer:
     COLD_START_MIN_HISTORY_DAYS = 60
     COLD_START_MIN_TRANSACTIONS = 12
     HARD_POISONING_REASON = "IMPOSSIBLE_TRAVEL"
@@ -138,7 +138,7 @@ class BehavioralFeatureEngineer:
                 """
                 NOT (
                     :hard_poisoning_reason = ANY(
-                        COALESCE(sr.behavior_reasons, ARRAY[]::TEXT[])
+                        COALESCE(sr.behaviour_reasons, ARRAY[]::TEXT[])
                     )
                 )
                 """
@@ -257,7 +257,7 @@ class BehavioralFeatureEngineer:
         profile_result = self._build_grouped_results(working, use_baseline_window=False)
         return profile_result.profile_frame
 
-    def upsert_behavioral_profile(self, profile_frame: pd.DataFrame) -> None:
+    def upsert_behavioural_profile(self, profile_frame: pd.DataFrame) -> None:
         records = profile_frame.to_dict(orient="records")
         if not records:
             raise ValueError("No profile rows available to persist.")
@@ -265,7 +265,7 @@ class BehavioralFeatureEngineer:
         engine = get_sqlalchemy_engine()
         upsert_profile = text(
             """
-            INSERT INTO behavioral_profiles (
+            INSERT INTO behavioural_profiles (
                 account_id,
                 avg_amount,
                 std_amount,
@@ -401,7 +401,7 @@ class BehavioralFeatureEngineer:
             baseline_transactions=pd.concat(baseline_frames, ignore_index=True),
         )
 
-    def persist_behavioral_profile(self, profile_frame: pd.DataFrame) -> None:
+    def persist_behavioural_profile(self, profile_frame: pd.DataFrame) -> None:
         records = profile_frame.to_dict(orient="records")
         if not records:
             raise ValueError("No profile rows available to persist.")
@@ -409,11 +409,11 @@ class BehavioralFeatureEngineer:
         engine = get_sqlalchemy_engine()
         try:
             with engine.begin() as connection:
-                connection.execute(text("TRUNCATE TABLE behavioral_profiles"))
+                connection.execute(text("TRUNCATE TABLE behavioural_profiles"))
         finally:
             engine.dispose()
 
-        self.upsert_behavioral_profile(profile_frame)
+        self.upsert_behavioural_profile(profile_frame)
 
     @staticmethod
     def _baseline_window(transactions: pd.DataFrame) -> pd.DataFrame:

@@ -23,7 +23,7 @@ DEFAULT_API_BASE = "http://127.0.0.1:8000"
 COUNTRY_CODES = ["", "IN", "US", "UK", "SG", "AE", "CA", "AU", "DE", "FR", "JP"]
 
 
-st.set_page_config(page_title="Behavioral Anomaly Testing UI", layout="wide")
+st.set_page_config(page_title="Behavioural Anomaly Testing UI", layout="wide")
 
 
 def _apply_geo_picker_selection() -> None:
@@ -88,7 +88,7 @@ def run_generation_script(
 def run_post_generation_pipeline(run_scoring: bool) -> dict:
     extract_command = [
         sys.executable,
-        str(PROJECT_ROOT / "scripts" / "extract_behavioral_features.py"),
+        str(PROJECT_ROOT / "scripts" / "extract_behavioural_features.py"),
     ]
     extract_completed = subprocess.run(extract_command, capture_output=True, text=True, cwd=PROJECT_ROOT, check=True)
 
@@ -99,18 +99,18 @@ def run_post_generation_pipeline(run_scoring: bool) -> dict:
     if run_scoring:
         score_command = [
             sys.executable,
-            str(PROJECT_ROOT / "scripts" / "run_behavior_scoring.py"),
+            str(PROJECT_ROOT / "scripts" / "run_behaviour_scoring.py"),
         ]
         score_completed = subprocess.run(score_command, capture_output=True, text=True, cwd=PROJECT_ROOT, check=True)
         result["score_output"] = score_completed.stdout.strip()
     return result
 
 
-def clear_behavior_history() -> None:
+def clear_behaviour_history() -> None:
     engine = get_sqlalchemy_engine()
     truncate_sql = text(
         """
-        TRUNCATE TABLE raw_transactions, behavioral_profiles, scoring_results
+        TRUNCATE TABLE raw_transactions, behavioural_profiles, scoring_results
         RESTART IDENTITY CASCADE
         """
     )
@@ -156,15 +156,15 @@ def load_visualization_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
             rt.country,
             rt.geo_coordinates,
             rt.mcc,
-            sr.behavior_score,
-            sr.behavior_change,
-            sr.behavior_reasons
+            sr.behaviour_score,
+            sr.behaviour_change,
+            sr.behaviour_reasons
         FROM raw_transactions rt
         LEFT JOIN scoring_results sr ON rt.event_id = sr.event_id
         ORDER BY rt.event_ts
         """
     )
-    profiles = load_dataframe("SELECT * FROM behavioral_profiles ORDER BY account_id")
+    profiles = load_dataframe("SELECT * FROM behavioural_profiles ORDER BY account_id")
     scoring = load_dataframe("SELECT * FROM scoring_results")
     return transactions, profiles, scoring
 
@@ -289,7 +289,7 @@ def render_single_transaction_tester() -> None:
             "geo_coordinates": geo_coordinates,
         }
         try:
-            response = requests.post(f"{api_base.rstrip('/')}/score-behavior", json=payload, timeout=30)
+            response = requests.post(f"{api_base.rstrip('/')}/score-behaviour", json=payload, timeout=30)
             response.raise_for_status()
             result = response.json()
         except requests.RequestException as exc:
@@ -303,9 +303,9 @@ def render_single_transaction_tester() -> None:
             return
 
         score_col, change_col = st.columns(2)
-        score_col.metric("Behavior Score", result["behavior_score"])
-        change_col.metric("Behavior Change", str(result["behavior_change"]))
-        if result["behavior_change"]:
+        score_col.metric("Behaviour Score", result["behaviour_score"])
+        change_col.metric("Behaviour Change", str(result["behaviour_change"]))
+        if result["behaviour_change"]:
             st.error(f"Flagged: {', '.join(result['reasons']) or 'No reasons returned'}")
         else:
             st.success("Transaction evaluated as normal.")
@@ -354,12 +354,12 @@ def render_bulk_simulator_controller() -> None:
 
     if action_col2.button("Clear History"):
         try:
-            clear_behavior_history()
+            clear_behaviour_history()
         except Exception as exc:
             st.error(f"Failed to clear history: {exc}")
             return
 
-        st.success("Cleared raw_transactions, behavioral_profiles, and scoring_results.")
+        st.success("Cleared raw_transactions, behavioural_profiles, and scoring_results.")
 
 
 def render_metrics_and_visualization() -> None:
@@ -379,9 +379,9 @@ def render_metrics_and_visualization() -> None:
     transactions["account_id"] = transactions["account_id"].astype(str)
     transactions["country"] = transactions["country"].astype(str)
     transactions["mcc"] = transactions["mcc"].astype(str)
-    transactions["behavior_change"] = transactions["behavior_change"].fillna(False)
-    transactions["behavior_label"] = transactions["behavior_change"].map({True: "Anomaly", False: "Normal"})
-    transactions["behavior_reasons"] = transactions["behavior_reasons"].apply(parse_reason_array)
+    transactions["behaviour_change"] = transactions["behaviour_change"].fillna(False)
+    transactions["behaviour_label"] = transactions["behaviour_change"].map({True: "Anomaly", False: "Normal"})
+    transactions["behaviour_reasons"] = transactions["behaviour_reasons"].apply(parse_reason_array)
     scoring["event_id"] = scoring["event_id"].astype(str)
     if "account_id" in profiles.columns:
         profiles["account_id"] = profiles["account_id"].astype(str)
@@ -393,17 +393,17 @@ def render_metrics_and_visualization() -> None:
 
     metric1, metric2, metric3 = st.columns(3)
     metric1.metric("Transactions", len(filtered_txns))
-    metric2.metric("Flagged Anomalies", int(filtered_txns["behavior_change"].sum()))
+    metric2.metric("Flagged Anomalies", int(filtered_txns["behaviour_change"].sum()))
     metric3.metric("Average Amount", round(float(filtered_txns["amount"].mean()), 2))
 
     scatter = px.scatter(
         filtered_txns,
         x="event_ts",
         y="amount",
-        color="behavior_label",
+        color="behaviour_label",
         color_discrete_map={"Normal": "green", "Anomaly": "red"},
         title="Transaction Amounts Over Time",
-        hover_data=["event_id", "behavior_score"],
+        hover_data=["event_id", "behaviour_score"],
     )
     st.plotly_chart(scatter, width="stretch")
 
@@ -414,7 +414,7 @@ def render_metrics_and_visualization() -> None:
             y=filtered_txns["amount"],
             mode="markers",
             marker=dict(
-                color=filtered_txns["behavior_label"].map({"Normal": "green", "Anomaly": "red"}),
+                color=filtered_txns["behaviour_label"].map({"Normal": "green", "Anomaly": "red"}),
                 size=9,
             ),
             name="Transactions",
@@ -435,26 +435,26 @@ def render_metrics_and_visualization() -> None:
     st.plotly_chart(deviation_chart, width="stretch")
 
     reason_rows = []
-    for reasons in transactions["behavior_reasons"]:
+    for reasons in transactions["behaviour_reasons"]:
         for reason in reasons:
             reason_rows.append({"reason": reason})
     reasons_df = pd.DataFrame(reason_rows)
     if reasons_df.empty:
-        st.info("No behavior reasons recorded yet.")
+        st.info("No behaviour reasons recorded yet.")
     else:
         reason_counts = reasons_df["reason"].value_counts().reset_index()
         reason_counts.columns = ["reason", "count"]
-        reasons_chart = px.bar(reason_counts, x="reason", y="count", title="Behavior Reasons Distribution")
+        reasons_chart = px.bar(reason_counts, x="reason", y="count", title="Behaviour Reasons Distribution")
         st.plotly_chart(reasons_chart, width="stretch")
 
-    with st.expander("Behavioral Profiles"):
+    with st.expander("Behavioural Profiles"):
         st.dataframe(filtered_profiles, width="stretch")
     with st.expander("Scoring Results"):
         st.dataframe(scoring, width="stretch")
 
 
 def main() -> None:
-    st.title("Behavioral Anomaly Detection Testing UI")
+    st.title("Behavioural Anomaly Detection Testing UI")
     tabs = st.tabs(
         [
             "Single Transaction Tester",

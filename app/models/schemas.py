@@ -31,7 +31,7 @@ class SimulationSummary(BaseModel):
     output_mode: Literal["csv", "postgres", "both", "memory"]
 
 
-class BehaviorScoringRequest(BaseModel):
+class BehaviourScoringRequest(BaseModel):
     event_id: str | None = None
     event_ts: datetime
     account_id: str
@@ -49,7 +49,7 @@ class BehaviorScoringRequest(BaseModel):
     geo_coordinates: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
 
-class BehaviorScoringResponse(BaseModel):
-    behavior_score: float
-    behavior_change: bool
+class BehaviourScoringResponse(BaseModel):
+    behaviour_score: float
+    behaviour_change: bool
     reasons: list[str]

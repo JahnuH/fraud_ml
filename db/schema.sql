@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS raw_transactions (
 ALTER TABLE raw_transactions
     ADD COLUMN IF NOT EXISTS geo_coordinates DOUBLE PRECISION[];
 
-CREATE TABLE IF NOT EXISTS behavioral_profiles (
+CREATE TABLE IF NOT EXISTS behavioural_profiles (
     account_id VARCHAR(64) PRIMARY KEY,
     avg_amount NUMERIC(12, 2) NOT NULL,
     std_amount NUMERIC(12, 2) NOT NULL,
@@ -29,16 +29,16 @@ CREATE TABLE IF NOT EXISTS behavioral_profiles (
     location_profile TEXT[] NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS behavioral_config (
-    behavior_change_flag BOOLEAN NOT NULL,
+CREATE TABLE IF NOT EXISTS behavioural_config (
+    behaviour_change_flag BOOLEAN NOT NULL,
     action_mapping VARCHAR(16) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS scoring_results (
     event_id UUID PRIMARY KEY REFERENCES raw_transactions(event_id) ON DELETE CASCADE,
-    behavior_score DOUBLE PRECISION,
-    behavior_change BOOLEAN,
-    behavior_reasons TEXT[]
+    behaviour_score DOUBLE PRECISION,
+    behaviour_change BOOLEAN,
+    behaviour_reasons TEXT[]
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_transactions_account_ts
