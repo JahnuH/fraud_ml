@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+/* Fix for Leaflet tiles showing blank spaces or clipping due to Tailwind's default image reset */
+.leaflet-container img {
+  max-width: none !important;
+  max-height: none !important;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
